@@ -9,6 +9,7 @@
 
 #include <bpfilter/dump.h>
 #include <bpfilter/elfstub.h>
+#include <bpfilter/ct.h>
 
 struct bf_set;
 
@@ -41,6 +42,10 @@ enum bf_fixup_type
     BF_FIXUP_TYPE_STATE_MAP_FD,
     /// Set a set map file descriptor in the @c BPF_LD_MAP_FD instruction.
     BF_FIXUP_TYPE_SET_MAP_FD,
+    /// Set a host-global CT map file descriptor in @c BPF_LD_MAP_FD.
+    BF_FIXUP_TYPE_CT_MAP_FD,
+    /// Set the tail-call prog_array map file descriptor.
+    BF_FIXUP_TYPE_PROG_ARRAY_FD,
     /// Call an ELF stub.
     BF_FIXUP_ELFSTUB_CALL,
     _BF_FIXUP_TYPE_MAX
@@ -51,6 +56,7 @@ union bf_fixup_attr
     /** Set referenced by a `BF_FIXUP_TYPE_SET_MAP_FD` fixup. The fixup
      * holds a non-owning pointer to a set in the generator's chain. */
     const struct bf_set *set_ptr;
+    enum bf_ct_map_id ct_map_id;
     enum bf_elfstub_id elfstub_id;
 };
 

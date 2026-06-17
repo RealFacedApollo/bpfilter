@@ -61,6 +61,7 @@
         BF_RULE_OPTION_COUNTER  = 1 << 1,
         BF_RULE_OPTION_MARK     = 1 << 2,
         BF_RULE_OPTION_LOG_RATE = 1 << 3,
+        BF_RULE_OPTION_NOTRACK  = 1 << 4,
     };
 
     struct bf_rule_options {
@@ -136,7 +137,7 @@
 %token CHAIN
 %token RULE
 %token SET
-%token NEGATE LOG COUNTER MARK EVERY
+%token NEGATE LOG COUNTER MARK EVERY NOTRACK
 %token REDIRECT_TOKEN
 %token <sval> SET_TYPE
 %token <sval> SET_RAW_PAYLOAD
@@ -341,6 +342,9 @@ rule            : RULE matchers rule_options rule_verdict
                     if ($3.flags & BF_RULE_OPTION_MARK)
                         bf_rule_mark_set(rule, $3.mark);
 
+                    if ($3.flags & BF_RULE_OPTION_NOTRACK)
+                        rule->flags |= BF_RULE_F_NOTRACK;
+
                     rule->verdict = $4.verdict;
                     if ($4.verdict == BF_VERDICT_REDIRECT)
                         bf_rule_set_redirect(rule, $4.redirect_ifindex, $4.redirect_dir);
@@ -394,6 +398,12 @@ rule_option     : LOG
                     $$ = (struct bf_rule_options){
                         .counter = true,
                         .flags = BF_RULE_OPTION_COUNTER,
+                    };
+                }
+                | NOTRACK
+                {
+                    $$ = (struct bf_rule_options){
+                        .flags = BF_RULE_OPTION_NOTRACK,
                     };
                 }
                 | MARK STRING
@@ -455,6 +465,12 @@ rule_options    : %empty { $$ = (struct bf_rule_options){}; }
                             bf_parse_err("duplicate keyword \"mark\" in rule");
                         $1.flags |= BF_RULE_OPTION_MARK;
                         $1.mark = $2.mark;
+                    }
+
+                    if ($2.flags & BF_RULE_OPTION_NOTRACK) {
+                        if ($1.flags & BF_RULE_OPTION_NOTRACK)
+                            bf_parse_err("duplicate keyword \"notrack\" in rule");
+                        $1.flags |= BF_RULE_OPTION_NOTRACK;
                     }
 
                     $$ = $1;

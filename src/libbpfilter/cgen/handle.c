@@ -151,11 +151,21 @@ void bf_handle_free(struct bf_handle **handle)
 
     closep(&(*handle)->prog_fd);
 
+    if ((*handle)->segment_fds) {
+        for (uint32_t i = 0; i < (*handle)->n_segments; ++i) {
+            if ((*handle)->segment_fds[i] >= 0)
+                close((*handle)->segment_fds[i]);
+        }
+        free((*handle)->segment_fds);
+        (*handle)->segment_fds = NULL;
+    }
+
     bf_link_free(&(*handle)->link);
     bf_map_free(&(*handle)->cmap);
     bf_map_free(&(*handle)->pmap);
     bf_map_free(&(*handle)->lmap);
     bf_map_free(&(*handle)->smap);
+    bf_map_free(&(*handle)->prog_array);
     bf_list_clean(&(*handle)->sets);
 
     free(*handle);
@@ -504,6 +514,15 @@ void bf_handle_unload(struct bf_handle *handle)
 
     closep(&handle->prog_fd);
 
+    if (handle->segment_fds) {
+        for (uint32_t i = 0; i < handle->n_segments; ++i) {
+            if (handle->segment_fds[i] >= 0)
+                close(handle->segment_fds[i]);
+        }
+        free(handle->segment_fds);
+        handle->segment_fds = NULL;
+    }
+
     /* Explicitly detach the BPF link before closing it. Relying solely on
      * close() is not sufficient when the link is pinned (the pin holds a
      * kernel reference that keeps the link alive). Using BPF_LINK_DETACH
@@ -515,5 +534,9 @@ void bf_handle_unload(struct bf_handle *handle)
     bf_map_free(&handle->pmap);
     bf_map_free(&handle->lmap);
     bf_map_free(&handle->smap);
+    bf_map_free(&handle->prog_array);
     bf_list_clean(&handle->sets);
+
+    handle->n_segments = 0;
+    handle->ct_rules_per_segment = 0;
 }

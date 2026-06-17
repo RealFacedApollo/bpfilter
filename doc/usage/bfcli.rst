@@ -237,6 +237,11 @@ See below for a list of available hook options.
 
 Update an existing chain. The new chain will atomically update the existing one. Hook options are ignored. The new chain will replace the existing chain with the same name. Counters are reset to zero.
 
+When conntrack is enabled, pinned flow maps under ``$BPFFS/bpfilter/ct/`` survive
+``chain update``. Established connections keep working as long as the new rule
+set still matches them and the key-normalization version in ``ct_meta`` matches
+this build. See :ref:`connection-tracking` and :doc:`../developers/conntrack`.
+
 If you want to modify the hook options, use ``bfcli chain set`` instead.
 
 **Options**
@@ -311,15 +316,55 @@ Detach, unload, and discard an existing chain.
 
 .. code:: shell
 
-    $ # Set an XDP chain and update it
-    $ sudo bfcli chain set --from-str "chain my_xdp_chain BF_HOOK_XDP ACCEPT"
-    $ sudo bfcli chain get --name my_xdp_chain
-      chain my_xdp_chain BF_HOOK_XDP ACCEPT
-          counters policy 0 packets 0 bytes; error 0 packets 0 bytes
     $ sudo bfcli chain flush --name my_xdp_chain
-    $ sudo bfcli chain get --name my_xdp_chain
-    $ # No output, chain doesn't exist
 
+``ct gc``
+~~~~~~~~~
+
+Manage conntrack garbage collection. Requires conntrack maps to be initialized
+(typically after loading a chain that uses ``ct.conntrack``; see
+:ref:`connection-tracking`).
+
+**Subcommands**
+
+``ct gc sweep``
+  Run one GC batch across all flow maps. Use ``--once`` for a full pass.
+
+  **Options**
+
+  - ``--batch-size N``: maximum entries to process per flow map per batch
+    (default: 10000).
+  - ``--once``: sweep every entry once instead of a single batch.
+
+``ct gc run``
+  Run the GC loop until interrupted (SIGINT or SIGTERM).
+
+  **Options**
+
+  - ``--interval SEC``: seconds between sweep batches (default: 10).
+  - ``--batch-size N``: batch size per sweep (default: 10000).
+
+``ct gc status``
+  Print GC heartbeat and key-normalization version for external supervisors.
+
+  **Example output**
+
+  .. code:: shell
+
+      key_norm_version=1
+      last_sweep_ns=1234567890123
+      stale=0
+
+  ``stale=1`` when no sweep has run in the last 120 seconds.
+
+**Examples**
+
+.. code:: shell
+
+    sudo bfcli ct gc sweep
+    sudo bfcli ct gc sweep --once
+    sudo bfcli ct gc run --interval 10 -b /sys/fs/bpf
+    sudo bfcli ct gc status
 
 Filters definition
 ------------------
@@ -426,12 +471,16 @@ Rules are defined such as:
         [$MATCHER...]
         [$SET...]
         [log [$HEADERS] [every $FREQUENCY]]
+        [notrack]
         [counter]
         [mark $MARK]
         $VERDICT
 
 With:
   - ``$MATCHER``: zero or more matchers. Matchers are defined later.
+  - ``notrack``: optional literal. When set on an ``ACCEPT`` rule, suppresses
+    conntrack entry creation for flows matched by that rule. Use on XDP chains
+    that must stay stateless. See :ref:`connection-tracking`.
   - ``log``: optional. Two forms are supported:
 
     - ``log $HEADERS``: log specific packet headers. ``$HEADERS`` is a comma-separated list of ``link`` (layer 2), ``internet`` (layer 3), and/or ``transport`` (layer 4). Only supported by packet-based hooks (XDP, TC, NF, cgroup_skb).
@@ -862,6 +911,100 @@ ICMPv6
 .. tip::
 
     The following ICMPv6 type name are recognized by bpfilter: destination-unreachable, packet-too-big, time-exceeded, echo-request, echo-reply, mld-listener-query, mld-listener-report, mld-listener-reduction, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, parameter-problem, mld2-listener-report.
+
+.. _connection-tracking:
+
+Connection tracking
+###################
+
+Connection tracking (conntrack) adds stateful filtering to bpfilter. Flow state
+is stored in host-global BPF maps pinned under ``$BPFFS/bpfilter/ct/``. All
+chains on the host share these maps. Run ``bfcli ct gc run`` in production to
+expire stale entries (see ``ct gc`` above).
+
+An ``ACCEPT`` rule without ``notrack`` creates conntrack entries for new
+flows. A typical chain places an ``ESTABLISHED``/``RELATED`` fast-path rule
+first, then ``ACCEPT`` rules that admit new traffic on specific ports or
+protocols.
+
+**Example**
+
+Stateful TCP filtering on TC ingress and egress (both chains attach to the
+same interface index):
+
+.. code:: shell
+
+    chain ct_ing BF_HOOK_TC_INGRESS{ifindex=2} DROP
+        rule ct.conntrack eq 0x6 ACCEPT
+        rule tcp.dport eq 443 ACCEPT
+
+    chain ct_egr BF_HOOK_TC_EGRESS{ifindex=2} DROP
+        rule ct.conntrack eq 0x6 ACCEPT
+        rule tcp.sport eq 443 ACCEPT
+
+The first rule fast-paths established and related flows (``0x6``). The second
+rule accepts new connections on port 443 and creates conntrack entries.
+
+.. flat-table::
+    :header-rows: 1
+    :widths: 2 2 1 4 12
+    :fill-cells:
+
+    * - Matches
+      - Type
+      - Operator
+      - Payload
+      - Notes
+    * - Conntrack state
+      - ``ct.conntrack`` or ``ctstate``
+      - ``eq``
+      - ``$MASK``
+      - ``$MASK`` is a decimal or hexadecimal bitmask of connection states
+        (see below). Supported on TC, Netfilter, and cgroup_skb hooks. Not
+        supported on ``BF_HOOK_XDP`` or ``BF_HOOK_CGROUP_SOCK_ADDR_*`` hooks.
+
+State bitmask values (OR together to match multiple states):
+
+.. flat-table::
+    :header-rows: 1
+    :widths: 4 2 2
+    :fill-cells:
+
+    * - State
+      - Bit
+      - Value
+    * - NEW
+      - 0
+      - ``0x1``
+    * - ESTABLISHED
+      - 1
+      - ``0x2``
+    * - RELATED
+      - 2
+      - ``0x4``
+    * - INVALID
+      - 3
+      - ``0x8``
+    * - REPLY
+      - 4
+      - ``0x10``
+
+For example, ``0x6`` matches ``ESTABLISHED`` or ``RELATED`` (``0x2 | 0x4``).
+
+.. note::
+
+    Chains that create or consult conntrack state cannot attach to
+    ``BF_HOOK_XDP``. This includes explicit ``ct.conntrack`` matchers,
+    ``ACCEPT`` rules without ``notrack``, and ``ACCEPT`` chain policy. Use
+    ``BF_HOOK_TC_INGRESS`` / ``BF_HOOK_TC_EGRESS`` for stateful rules, or mark
+    rules ``notrack`` for stateless XDP chains.
+
+.. tip::
+
+    When a rule accepts ``NEW`` traffic, add a leading ``ct.conntrack eq 0x6``
+    rule so return traffic is fast-pathed. Without it, every packet in an
+    established flow re-evaluates the full chain. For reload behavior and
+    connection drain after rule removal, see :doc:`../developers/conntrack`.
 
 
 .. _IEEE 802 number: https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml cli,core: convert meta.l3_proto to new framework)

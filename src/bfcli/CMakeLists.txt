@@ -51,6 +51,7 @@ add_custom_target(bfcli_lexer
 add_executable(bfcli
     ${CMAKE_CURRENT_SOURCE_DIR}/main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/chain.h             ${CMAKE_CURRENT_SOURCE_DIR}/chain.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ct.h                  ${CMAKE_CURRENT_SOURCE_DIR}/ct.c
     ${CMAKE_CURRENT_SOURCE_DIR}/helper.h            ${CMAKE_CURRENT_SOURCE_DIR}/helper.c
     ${CMAKE_CURRENT_SOURCE_DIR}/opts.h              ${CMAKE_CURRENT_SOURCE_DIR}/opts.c
     ${CMAKE_CURRENT_SOURCE_DIR}/print.h             ${CMAKE_CURRENT_SOURCE_DIR}/print.c

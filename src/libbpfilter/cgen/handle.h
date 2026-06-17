@@ -56,6 +56,18 @@ struct bf_handle
      * per rule. NULL if the chain has no logging rules. */
     struct bf_map *smap;
 
+    /** Tail-call prog_array for multi-segment CT chains. NULL if single prog. */
+    struct bf_map *prog_array;
+
+    /** Number of BPF programs in @c prog_array (1 = no tail calls). */
+    uint32_t n_segments;
+
+    /** Loaded program FDs for each segment. Only valid when @c n_segments > 1. */
+    int *segment_fds;
+
+    /** Rules per segment when @c n_segments > 1. */
+    uint32_t ct_rules_per_segment;
+
     /** List of set maps. Contains at most one map for each unique key
      * format. */
     bf_list sets;

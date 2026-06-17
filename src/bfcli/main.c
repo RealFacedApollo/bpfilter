@@ -47,7 +47,8 @@ int main(int argc, char *argv[])
         return r;
 
     if (!opts.dry_run) {
-        r = bf_ctx_setup(opts.with_bpf_token, opts.bpffs_path, opts.verbose);
+        r = bf_ctx_setup_ex(opts.with_bpf_token, opts.bpffs_path, opts.verbose,
+                            BF_CTX_F_CONNTRACK);
         if (r < 0)
             return r;
     }

@@ -42,6 +42,7 @@
 %s STATE_MATCHER_ICMP_TYPE
 %s STATE_MATCHER_ICMP_CODE
 %s STATE_MATCHER_TCP_FLAGS
+%s STATE_MATCHER_CT
 
 int             (-|(0x))?[0-9a-zA-Z]+
 float           [0-9]+(\.[0-9]+)?
@@ -57,6 +58,7 @@ set             { return SET; }
     /* Keywords */
 not             { return NEGATE; }
 counter         { return COUNTER; }
+notrack         { return NOTRACK; }
 
     /* Hooks */
 BF_HOOK_[A-Z0-9_]+ { BEGIN(STATE_HOOK_OPTS); yylval.sval = strdup(yytext); return HOOK; }
@@ -284,6 +286,16 @@ tcp\.flags      { BEGIN(STATE_MATCHER_TCP_FLAGS); yylval.sval = strdup(yytext); 
 <STATE_MATCHER_TCP_FLAGS>{
     (eq|any|all) { yylval.sval = strdup(yytext); return MATCHER_OP; }
     ([a-zA-Z]+,?)+ {
+        BEGIN(INITIAL);
+        yylval.sval = strdup(yytext);
+        return RAW_PAYLOAD;
+    }
+}
+
+ct\.conntrack|ctstate { BEGIN(STATE_MATCHER_CT); yylval.sval = strdup(yytext); return MATCHER_TYPE; }
+<STATE_MATCHER_CT>{
+    (eq) { yylval.sval = strdup(yytext); return MATCHER_OP; }
+    {int} {
         BEGIN(INITIAL);
         yylval.sval = strdup(yytext);
         return RAW_PAYLOAD;

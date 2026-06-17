@@ -17,6 +17,7 @@
 #include <bpfilter/helper.h>
 #include <bpfilter/pack.h>
 
+#include "cgen/ct.h"
 #include "cgen/fixup.h"
 #include "cgen/printer.h"
 #include "cgen/runtime.h"
@@ -198,6 +199,34 @@
             return __r;                                                        \
     })
 
+#define EMIT_LOAD_CT_MAP_FD_FIXUP(program, reg, map_id)                        \
+    ({                                                                         \
+        union bf_fixup_attr __attr;                                            \
+        memset(&__attr, 0, sizeof(__attr));                                    \
+        __attr.ct_map_id = (map_id);                                           \
+        const struct bpf_insn ld_insn[2] = {BPF_LD_MAP_FD(reg, 0)};            \
+        int __r = bf_program_emit_fixup((program), BF_FIXUP_TYPE_CT_MAP_FD,  \
+                                        ld_insn[0], &__attr);                  \
+        if (__r < 0)                                                           \
+            return __r;                                                        \
+        __r = bf_program_emit((program), ld_insn[1]);                          \
+        if (__r < 0)                                                           \
+            return __r;                                                        \
+    })
+
+#define EMIT_LOAD_PROG_ARRAY_FD_FIXUP(program, reg)                            \
+    ({                                                                         \
+        const struct bpf_insn ld_insn[2] = {BPF_LD_MAP_FD(reg, 0)};            \
+        int __r = bf_program_emit_fixup((program),                           \
+                                        BF_FIXUP_TYPE_PROG_ARRAY_FD,           \
+                                        ld_insn[0], NULL);                     \
+        if (__r < 0)                                                           \
+            return __r;                                                        \
+        __r = bf_program_emit((program), ld_insn[1]);                          \
+        if (__r < 0)                                                           \
+            return __r;                                                        \
+    })
+
 struct bf_chain;
 struct bf_counter;
 struct bf_hookopts;
@@ -240,6 +269,9 @@ struct bf_program
          * the @ref bf_program doesn't have to manage its lifetime. */
         const struct bf_chain *chain;
     } runtime;
+
+    /** Tail-call segment state for conntrack chains (§10.5). */
+    struct bf_program_ctgen ctgen;
 };
 
 #define _free_bf_program_ __attribute__((__cleanup__(bf_program_free)))
@@ -275,6 +307,7 @@ int bf_program_emit_fixup(struct bf_program *program, enum bf_fixup_type type,
 int bf_program_emit_fixup_elfstub(struct bf_program *program,
                                   enum bf_elfstub_id id);
 int bf_program_generate(struct bf_program *program);
+int bf_program_generate_split(struct bf_program *program);
 
 /**
  * @brief Get the bit position of a set within its group.

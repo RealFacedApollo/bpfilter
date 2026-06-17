@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include <bpfilter/hook.h>
+#include <bpfilter/ct.h>
 
 /**
  * @file opts.h
@@ -35,6 +36,7 @@ enum bfc_object
 {
     BFC_OBJECT_RULESET,
     BFC_OBJECT_CHAIN,
+    BFC_OBJECT_CT,
     _BFC_OBJECT_MAX,
 };
 
@@ -51,6 +53,9 @@ enum bfc_action
     BFC_ACTION_UPDATE,
     BFC_ACTION_UPDATE_SET,
     BFC_ACTION_FLUSH,
+    BFC_ACTION_GC_SWEEP,
+    BFC_ACTION_GC_RUN,
+    BFC_ACTION_GC_STATUS,
     _BFC_ACTION_MAX,
 };
 
@@ -82,6 +87,10 @@ struct bfc_opts
     bool dry_run;
     bool no_set_content;
 
+    unsigned gc_interval_sec;
+    unsigned gc_batch_size;
+    bool gc_once;
+
     bool with_bpf_token;
     const char *bpffs_path;
     uint16_t verbose;
@@ -106,6 +115,8 @@ struct bfc_opts_cmd
      .action = _BFC_ACTION_MAX,                                                \
      .set_add = bf_list_default(NULL, NULL),                                   \
      .set_remove = bf_list_default(NULL, NULL),                                \
+     .gc_interval_sec = BF_CT_GC_INTERVAL_SEC,                                 \
+     .gc_batch_size = BF_CT_GC_BATCH_SIZE,                                     \
      .bpffs_path = "/sys/fs/bpf"};
 
 void bfc_opts_clean(struct bfc_opts *opts);

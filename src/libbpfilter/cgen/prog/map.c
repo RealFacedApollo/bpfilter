@@ -126,6 +126,8 @@ static struct bf_btf *_bf_map_make_btf(const struct bf_map *map)
     case BF_MAP_TYPE_CTX:
         // No BTF data available for these map types
         return NULL;
+    case BF_MAP_TYPE_PROG_ARRAY:
+        return NULL;
     default:
         bf_err_r(-ENOTSUP, "bf_map type %d is not supported", map->type);
         return NULL;
@@ -209,6 +211,7 @@ int bf_map_new(struct bf_map **map, const char *name, enum bf_map_type type,
         [BF_MAP_TYPE_SET] = BF_BPF_MAP_TYPE_HASH,
         [BF_MAP_TYPE_CTX] = BF_BPF_MAP_TYPE_ARRAY,
         [BF_MAP_TYPE_STATE] = BF_BPF_MAP_TYPE_ARRAY,
+        [BF_MAP_TYPE_PROG_ARRAY] = BF_BPF_MAP_TYPE_PROG_ARRAY,
     };
 
     assert(map);
@@ -329,6 +332,7 @@ static const char *_bf_map_type_to_str(enum bf_map_type type)
         [BF_MAP_TYPE_SET] = "BF_MAP_TYPE_SET",
         [BF_MAP_TYPE_CTX] = "BF_MAP_TYPE_CTX",
         [BF_MAP_TYPE_STATE] = "BF_MAP_TYPE_STATE",
+        [BF_MAP_TYPE_PROG_ARRAY] = "BF_MAP_TYPE_PROG_ARRAY",
     };
 
     static_assert_enum_mapping(type_strs, _BF_MAP_TYPE_MAX);
@@ -342,6 +346,7 @@ static const char *_bf_bpf_type_to_str(enum bf_bpf_map_type type)
     static const char *type_strs[] = {
         [BF_BPF_MAP_TYPE_HASH] = "BF_BPF_MAP_TYPE_HASH",
         [BF_BPF_MAP_TYPE_ARRAY] = "BF_BPF_MAP_TYPE_ARRAY",
+        [BF_BPF_MAP_TYPE_PROG_ARRAY] = "BF_BPF_MAP_TYPE_PROG_ARRAY",
         [BF_BPF_MAP_TYPE_PERCPU_ARRAY] = "BF_BPF_MAP_TYPE_PERCPU_ARRAY",
         [BF_BPF_MAP_TYPE_LPM_TRIE] = "BF_BPF_MAP_TYPE_LPM_TRIE",
         [BF_BPF_MAP_TYPE_RINGBUF] = "BF_BPF_MAP_TYPE_RINGBUF",

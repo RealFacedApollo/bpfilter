@@ -19,6 +19,9 @@
 
 #define BF_RULE_MARK_MASK (0x00000000ffffffffULL)
 
+/** Suppress implicit @c ct_create_if_new() on ACCEPT verdicts (§9.3). */
+#define BF_RULE_F_NOTRACK (1u << 0)
+
 /**
  * @brief Return the string representation of a `bf_log_opt` enumeration value.
  *
@@ -82,6 +85,9 @@ struct bf_rule
 
     /** If true, skip this rule during flag calculation and code generation. */
     bool disabled;
+
+    /** Rule flags (see @c BF_RULE_F_*). */
+    uint8_t flags;
 
     enum bf_verdict verdict;
 
@@ -194,4 +200,11 @@ static inline bool bf_rule_has_redirect(const struct bf_rule *rule)
     assert(rule);
 
     return rule->redirect_ifindex != 0;
+}
+
+static inline bool bf_rule_has_notrack(const struct bf_rule *rule)
+{
+    assert(rule);
+
+    return rule->flags & BF_RULE_F_NOTRACK;
 }

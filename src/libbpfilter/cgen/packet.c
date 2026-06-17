@@ -23,6 +23,7 @@
 #include <bpfilter/set.h>
 
 #include "cgen/matcher/cmp.h"
+#include "cgen/ct.h"
 #include "cgen/matcher/meta.h"
 #include "cgen/matcher/set.h"
 #include "cgen/program.h"
@@ -412,6 +413,8 @@ int bf_packet_gen_inline_matcher(struct bf_program *program,
         return _bf_matcher_pkt_generate_ip6_dscp(program, matcher, meta);
     case BF_MATCHER_SET:
         return _bf_matcher_pkt_generate_set(program, matcher);
+    case BF_MATCHER_CONNTRACK:
+        return bf_ct_emit_match(program, matcher);
     default:
         return bf_err_r(-EINVAL, "unknown matcher type %d",
                         bf_matcher_get_type(matcher));

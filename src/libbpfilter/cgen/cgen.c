@@ -18,6 +18,8 @@
 #include <bpfilter/chain.h>
 #include <bpfilter/core/list.h>
 #include <bpfilter/counter.h>
+#include <bpfilter/ct.h>
+#include <bpfilter/ctx.h>
 #include <bpfilter/dump.h>
 #include <bpfilter/helper.h>
 #include <bpfilter/hook.h>
@@ -321,7 +323,7 @@ int bf_cgen_set(struct bf_cgen *cgen, struct bf_hookopts **hookopts,
     if (r < 0)
         return r;
 
-    r = bf_program_generate(prog);
+    r = bf_program_generate_split(prog);
     if (r < 0)
         return bf_err_r(r, "failed to generate bf_program");
 
@@ -361,7 +363,7 @@ int bf_cgen_load(struct bf_cgen *cgen, struct bf_lock *lock)
     if (r < 0)
         return r;
 
-    r = bf_program_generate(prog);
+    r = bf_program_generate_split(prog);
     if (r < 0)
         return bf_err_r(r, "failed to generate bf_program");
 
@@ -478,6 +480,12 @@ int bf_cgen_update(struct bf_cgen *cgen, struct bf_chain **new_chain,
     if (flags & ~BF_FLAGS_MASK(_BF_CGEN_UPDATE_MAX))
         return bf_err_r(-EINVAL, "unknown update flags: 0x%x", flags);
 
+    if (bf_ctx_get_ct_maps()) {
+        r = bf_ct_maps_check_reload(bf_ctx_get_ct_maps());
+        if (r)
+            return r;
+    }
+
     old_handle = cgen->handle;
 
     r = bf_handle_new(&new_handle, _BF_PROG_NAME);
@@ -488,7 +496,7 @@ int bf_cgen_update(struct bf_cgen *cgen, struct bf_chain **new_chain,
     if (r < 0)
         return bf_err_r(r, "failed to create a new bf_program");
 
-    r = bf_program_generate(new_prog);
+    r = bf_program_generate_split(new_prog);
     if (r < 0) {
         return bf_err_r(r,
                         "failed to generate the bytecode for a new bf_program");

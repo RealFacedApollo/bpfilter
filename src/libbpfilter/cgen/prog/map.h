@@ -27,6 +27,9 @@ enum bf_map_type
      * flat array of `bf_rule_state` entries, indexed by rule position. */
     BF_MAP_TYPE_STATE,
 
+    /** prog_array for tail-call chain segments. */
+    BF_MAP_TYPE_PROG_ARRAY,
+
     _BF_MAP_TYPE_MAX,
 };
 

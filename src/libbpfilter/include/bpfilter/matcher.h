@@ -111,11 +111,25 @@ enum bf_matcher_type
     BF_MATCHER_ICMPV6_CODE,
     /// Matches in a set, the set knows how to build the key from the packet
     BF_MATCHER_SET,
+    /// Matches the packet's conntrack state (see @ref bf_match_ct_payload).
+    BF_MATCHER_CONNTRACK,
     _BF_MATCHER_TYPE_MAX,
 };
 
 static_assert(_BF_MATCHER_TYPE_MAX <= 8 * sizeof(uint64_t),
               "too many matcher types for uint64_t bitmask");
+
+/**
+ * Payload for @ref BF_MATCHER_CONNTRACK matchers.
+ *
+ * @c state_mask is a bitmask of @c CT_STATE_* values from @ref ct.h .
+ */
+struct bf_match_ct_payload
+{
+    uint8_t state_mask;
+    uint8_t invert;
+    uint8_t pad[2];
+};
 
 /**
  * Defines the structure of the payload for bf_matcher's

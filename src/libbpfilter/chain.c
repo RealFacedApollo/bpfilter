@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <bpfilter/ct.h>
+
 #include "bpfilter/core/list.h"
 #include "bpfilter/dump.h"
 #include "bpfilter/helper.h"
@@ -184,6 +186,10 @@ static int _bf_chain_check_rule(struct bf_chain *chain, struct bf_rule *rule)
     if (rule->log && rule->log_rate_ns && !rule->disabled)
         chain->flags |= BF_FLAG(BF_CHAIN_LOG_RATELIMIT);
 
+    if (!rule->disabled && rule->verdict == BF_VERDICT_ACCEPT &&
+        !bf_rule_has_notrack(rule))
+        chain->flags |= BF_FLAG(BF_CHAIN_CONNTRACK);
+
     if (bf_rule_mark_is_set(rule) &&
         bf_hook_to_flavor(chain->hook) != BF_FLAVOR_TC &&
         bf_hook_to_flavor(chain->hook) != BF_FLAVOR_CGROUP_SKB) {
@@ -199,6 +205,10 @@ static int _bf_chain_check_rule(struct bf_chain *chain, struct bf_rule *rule)
         if (bf_matcher_get_type(matcher) == BF_MATCHER_IP6_NEXTHDR &&
             !rule->disabled)
             chain->flags |= BF_FLAG(BF_CHAIN_STORE_NEXTHDR);
+
+        if (bf_matcher_get_type(matcher) == BF_MATCHER_CONNTRACK &&
+            !rule->disabled)
+            chain->flags |= BF_FLAG(BF_CHAIN_CONNTRACK);
 
         // Ensure the matcher is compatible with the chain's hook.
         meta = bf_matcher_get_meta(bf_matcher_get_type(matcher));
@@ -287,6 +297,15 @@ int bf_chain_new(struct bf_chain **chain, const char *name, enum bf_hook hook,
         if (r)
             return r;
     }
+
+    if (_chain->policy == BF_VERDICT_ACCEPT)
+        _chain->flags |= BF_FLAG(BF_CHAIN_CONNTRACK);
+
+    r = bf_ct_validate_hook_compat(_chain);
+    if (r)
+        return r;
+
+    bf_ct_warn_chain_policy(_chain);
 
     *chain = TAKE_PTR(_chain);
 

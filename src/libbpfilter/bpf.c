@@ -94,6 +94,35 @@ int bf_bpf_map_lookup_elem(int fd, const void *key, void *value)
     return bf_bpf(BF_BPF_MAP_LOOKUP_ELEM, &attr);
 }
 
+int bf_bpf_map_get_next_key(int fd, const void *key, void *next_key)
+{
+    union bpf_attr attr;
+
+    assert(next_key);
+
+    memset(&attr, 0, sizeof(attr));
+
+    attr.map_fd = fd;
+    attr.key = (uint64_t)key;
+    attr.next_key = (uint64_t)next_key;
+
+    return bf_bpf(BF_BPF_MAP_GET_NEXT_KEY, &attr);
+}
+
+int bf_bpf_map_delete_elem(int fd, const void *key)
+{
+    union bpf_attr attr;
+
+    assert(key);
+
+    memset(&attr, 0, sizeof(attr));
+
+    attr.map_fd = fd;
+    attr.key = (uint64_t)key;
+
+    return bf_bpf(BF_BPF_MAP_DELETE_ELEM, &attr);
+}
+
 int bf_bpf_map_get_info(int fd, struct bpf_map_info *info)
 {
     union bpf_attr attr;

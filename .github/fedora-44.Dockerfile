@@ -26,6 +26,7 @@ RUN dnf --disablerepo=* --enablerepo=fedora,updates --nodocs --setopt=install_we
     libgit2-devel \
     libpfm-devel \
     libtool \
+    nmap-ncat \
     pipx \
     procps-ng \
     python3-breathe \

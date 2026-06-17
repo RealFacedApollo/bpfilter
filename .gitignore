@@ -17,3 +17,30 @@ __pycache__
 
 # Local Claude instructions
 CLAUDE.local.md
+
+# In-source CMake build artifacts (use cmake -S . -B build instead)
+/CMakeCache.txt
+/CMakeFiles/
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Makefile
+/CMakeDoxyfile.in
+/CMakeDoxygenDefaults.cmake
+/compile_commands.json
+/output/
+**/CMakeFiles/
+**/cmake_install.cmake
+**/Makefile
+**/CTestTestfile.cmake
+doc/Doxyfile
+doc/conf.py
+
+# Object files and local reports
+*.o
+.benchmarks_report.d*
+.coverage_report.d*
+
+# Build-generated headers (when cmake runs in-source)
+src/libbpfilter/include/bpfilter/version.h
+src/libbpfilter/include/cgen/rawstubs.h
+src/libbpfilter/elfstubs/

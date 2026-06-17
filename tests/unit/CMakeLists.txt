@@ -44,6 +44,9 @@ function(bf_add_c_test GROUP SOURCE)
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/src/libbpfilter
     )
+    target_include_directories(${target_name} SYSTEM PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/external/include
+    )
 
     add_test(NAME ${target_name}
         COMMAND $<TARGET_FILE:${target_name}>
@@ -53,6 +56,53 @@ function(bf_add_c_test GROUP SOURCE)
         ENVIRONMENT "LD_PRELOAD=${ASAN_LIB_PATH}:$<TARGET_FILE:mock>"
     )
     set_tests_properties(${target_name} PROPERTIES LABELS "${GROUP}")
+endfunction()
+
+# Real BPF syscall tests — no syscall mock preload.
+function(bf_add_c_bpf_test GROUP SOURCE)
+    find_package(cmocka REQUIRED)
+
+    set(source_wo_ext ${SOURCE})
+    cmake_path(REMOVE_EXTENSION source_wo_ext)
+    string(REPLACE "/" "." target_suffix "${source_wo_ext}")
+
+    set(target_name "${GROUP}.${target_suffix}")
+
+    add_executable(${target_name} EXCLUDE_FROM_ALL ${SOURCE})
+
+    target_compile_options(${target_name}
+        PRIVATE
+            -Werror=unused-function
+    )
+
+    target_link_libraries(${target_name}
+        PRIVATE
+            bf_global_flags
+            libbpfilter
+            harness
+            cmocka
+    )
+
+    add_dependencies(unit_bin ${target_name})
+    target_include_directories(${target_name}
+      PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/src/libbpfilter
+    )
+    target_include_directories(${target_name} SYSTEM PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/external/include
+    )
+
+    add_test(NAME ${target_name}
+        COMMAND $<TARGET_FILE:${target_name}>
+    )
+
+    if(ASAN_LIB_PATH)
+        set_tests_properties(${target_name} PROPERTIES
+            ENVIRONMENT "LD_PRELOAD=${ASAN_LIB_PATH}"
+        )
+    endif()
+    set_tests_properties(${target_name} PROPERTIES LABELS "${GROUP};bpf")
 endfunction()
 
 # In debug builds, we need to preload the ASan library for the tests to run, before the mock library.
@@ -78,6 +128,48 @@ add_custom_target(unit
 bf_add_c_test(unit libbpfilter/bpf.c)
 bf_add_c_test(unit libbpfilter/btf.c)
 bf_add_c_test(unit libbpfilter/chain.c)
+bf_add_c_test(unit libbpfilter/ct/key.c)
+bf_add_c_test(unit libbpfilter/ct/layout.c)
+bf_add_c_test(unit libbpfilter/ct/maps.c)
+bf_add_c_test(unit libbpfilter/ct/timeout.c)
+bf_add_c_test(unit libbpfilter/ct/validate.c)
+bf_add_c_bpf_test(unit libbpfilter/ct/maps_bpf.c)
+bf_add_c_bpf_test(unit libbpfilter/ct/meta.c)
+bf_add_c_bpf_test(unit libbpfilter/ct/gc.c)
+
+include(BpfObject)
+bf_compile_bpf_object(
+    CT_HARNESS_BPF_O
+    ${CMAKE_SOURCE_DIR}/tests/unit/libbpfilter/ct/bpf/ct_harness.bpf.c
+)
+
+find_package(cmocka REQUIRED)
+set(_lookup_bpf_target unit.libbpfilter.ct.lookup_bpf)
+add_executable(${_lookup_bpf_target} EXCLUDE_FROM_ALL
+    libbpfilter/ct/lookup_bpf.c
+)
+target_compile_options(${_lookup_bpf_target} PRIVATE -Werror=unused-function)
+target_compile_definitions(${_lookup_bpf_target}
+    PRIVATE CT_HARNESS_BPF_PATH="${CT_HARNESS_BPF_O}"
+)
+target_link_libraries(${_lookup_bpf_target}
+    PRIVATE bf_global_flags libbpfilter harness cmocka
+)
+add_dependencies(${_lookup_bpf_target} libbpfilter ct_harness_bpf_obj)
+target_include_directories(${_lookup_bpf_target}
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src/libbpfilter
+)
+add_dependencies(unit_bin ${_lookup_bpf_target})
+add_test(NAME ${_lookup_bpf_target} COMMAND $<TARGET_FILE:${_lookup_bpf_target}>)
+if(ASAN_LIB_PATH)
+    set_tests_properties(${_lookup_bpf_target} PROPERTIES
+        ENVIRONMENT "LD_PRELOAD=${ASAN_LIB_PATH}"
+    )
+endif()
+set_tests_properties(${_lookup_bpf_target} PROPERTIES LABELS "unit;bpf")
+
+bf_add_c_test(unit libbpfilter/cgen/ct.c)
+bf_add_c_bpf_test(unit libbpfilter/ct/ct_chain_bpf.c)
 bf_add_c_test(unit libbpfilter/cli.c)
 bf_add_c_test(unit libbpfilter/counter.c)
 bf_add_c_test(unit libbpfilter/ctx.c)

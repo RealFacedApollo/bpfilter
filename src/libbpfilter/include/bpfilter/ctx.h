@@ -28,6 +28,7 @@
 
 struct bf_cgen;
 struct bf_lock;
+struct bf_ct_maps;
 
 enum bf_verbose
 {
@@ -35,6 +36,12 @@ enum bf_verbose
     BF_VERBOSE_BPF,
     BF_VERBOSE_BYTECODE,
     _BF_VERBOSE_MAX,
+};
+
+/** Optional flags for @ref bf_ctx_setup_ex. */
+enum bf_ctx_flag
+{
+    BF_CTX_F_CONNTRACK = 1u << 0,
 };
 
 /**
@@ -50,6 +57,18 @@ enum bf_verbose
  * @return 0 on success, or a negative errno value on failure.
  */
 int bf_ctx_setup(bool with_bpf_token, const char *bpffs_path, uint16_t verbose);
+
+/**
+ * Initialise the global context with optional feature flags.
+ *
+ * @param with_bpf_token If true, create a BPF token from bpffs.
+ * @param bpffs_path Path to the bpffs mountpoint. Can't be NULL.
+ * @param verbose Bitmask of verbose flags.
+ * @param flags Bitmask of @ref bf_ctx_flag values.
+ * @return 0 on success, or a negative errno value on failure.
+ */
+int bf_ctx_setup_ex(bool with_bpf_token, const char *bpffs_path,
+                    uint16_t verbose, uint32_t flags);
 
 /**
  * Teardown the global context.
@@ -132,3 +151,9 @@ bool bf_ctx_is_verbose(enum bf_verbose opt);
  * @return Path to the configured BPF filesystem.
  */
 const char *bf_ctx_get_bpffs_path(void);
+
+/**
+ * @return Host-global conntrack maps, or NULL if @ref BF_CTX_F_CONNTRACK was
+ *         not passed to @ref bf_ctx_setup_ex.
+ */
+struct bf_ct_maps *bf_ctx_get_ct_maps(void);

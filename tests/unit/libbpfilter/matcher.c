@@ -7,6 +7,8 @@
 
 #include <bpfilter/matcher.h>
 
+#include <bpfilter/ct.h>
+
 #include "bpfilter/dump.h"
 #include "bpfilter/pack.h"
 #include "fake.h"
@@ -1871,6 +1873,34 @@ static void meta_flow_probability_pack_unpack(void **state)
     assert_true(bft_matcher_equal(source, destination));
 }
 
+static void conntrack_pack_unpack(void **state)
+{
+    _free_bf_matcher_ struct bf_matcher *source = NULL;
+    _free_bf_matcher_ struct bf_matcher *destination = NULL;
+    _free_bf_wpack_ bf_wpack_t *wpack = NULL;
+    _free_bf_rpack_ bf_rpack_t *rpack = NULL;
+    const void *data;
+    size_t data_len;
+    struct bf_match_ct_payload ct = {
+        .state_mask = CT_STATE_ESTABLISHED | CT_STATE_RELATED,
+        .invert = 1,
+    };
+
+    (void)state;
+
+    assert_ok(bf_matcher_new(&source, BF_MATCHER_CONNTRACK, BF_MATCHER_EQ, &ct,
+                             sizeof(ct), false));
+    assert_ok(bf_wpack_new(&wpack));
+    assert_ok(bf_matcher_pack(source, wpack));
+    assert_ok(bf_wpack_get_data(wpack, &data, &data_len));
+
+    assert_ok(bf_rpack_new(&rpack, data, data_len));
+    assert_ok(bf_matcher_new_from_pack(&destination, bf_rpack_root(rpack)));
+
+    assert_int_equal(bf_matcher_get_type(destination), BF_MATCHER_CONNTRACK);
+    assert_memory_equal(bf_matcher_payload(destination), &ct, sizeof(ct));
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -1936,6 +1966,7 @@ int main(void)
         cmocka_unit_test(meta_flow_probability),
         cmocka_unit_test(meta_flow_probability_invalid),
         cmocka_unit_test(meta_flow_probability_pack_unpack),
+        cmocka_unit_test(conntrack_pack_unpack),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Local Fedora dev environment for bpfilter.
+#
+# Builds a persistent Docker image once (from .github/fedora-44.Dockerfile),
+# then reuses it for shells, builds, and tests. Source and build/ are mounted
+# from the host so incremental compiles survive between runs.
+#
+# Usage:
+#   scripts/dev image              Build the dev image (skip if it exists)
+#   scripts/dev image --rebuild    Force rebuild the dev image
+#   scripts/dev shell              Interactive shell in the dev container
+#   scripts/dev cmake [args...]    Run cmake (default: debug + coverage)
+#   scripts/dev make [target]      Run make -C build
+#   scripts/dev unit [ctest -R]    Build unit_bin and run unit tests
+#   scripts/dev e2e [ctest -R]     Build e2e_bin and run e2e tests (privileged)
+#   scripts/dev run [--] cmd...    Run an arbitrary command in the container
+#
+# Examples:
+#   scripts/dev unit 'unit.libbpfilter.ct'
+#   scripts/dev make libbpfilter
+#   scripts/dev run ctest --test-dir build -R unit.libbpfilter.ctx -V
+
+set -euo pipefail
+
+readonly IMAGE="${BPFILTER_DEV_IMAGE:-bpfilter-dev:local}"
+readonly DOCKERFILE=".github/fedora-44.Dockerfile"
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+die() {
+    echo "dev: $*" >&2
+    exit 1
+}
+
+need_docker() {
+    command -v docker >/dev/null 2>&1 || die "docker is not installed or not in PATH"
+    docker info >/dev/null 2>&1 || die "docker daemon is not running"
+}
+
+image_exists() {
+    docker image inspect "$IMAGE" >/dev/null 2>&1
+}
+
+cmd_image() {
+    local rebuild=false
+
+    if [[ "${1:-}" == "--rebuild" ]]; then
+        rebuild=true
+        shift
+    fi
+    [[ $# -eq 0 ]] || die "usage: dev image [--rebuild]"
+
+    need_docker
+
+    if image_exists && [[ "$rebuild" == false ]]; then
+        echo "dev: image $IMAGE already exists (use 'dev image --rebuild' to refresh)"
+        return 0
+    fi
+
+    echo "dev: building $IMAGE from $DOCKERFILE (one-time; may take several minutes)..."
+    docker build \
+        -f "$ROOT/$DOCKERFILE" \
+        -t "$IMAGE" \
+        "$ROOT"
+    echo "dev: image $IMAGE ready"
+}
+
+docker_run() {
+    local interactive=false
+    local privileged=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -i) interactive=true; shift ;;
+        --privileged) privileged=true; shift ;;
+        --) shift; break ;;
+        *) break ;;
+        esac
+    done
+
+    need_docker
+    image_exists || {
+        echo "dev: image $IMAGE not found, building..."
+        cmd_image
+    }
+
+    local -a args=(
+        run --rm
+        -v "$ROOT:/src"
+        -w /src
+    )
+
+    [[ "$interactive" == true ]] && args+=(-it)
+    [[ "$privileged" == true ]] && args+=(--privileged)
+
+    docker "${args[@]}" "$IMAGE" "$@"
+}
+
+cmd_shell() {
+    docker_run -i -- bash -l
+}
+
+cmd_cmake() {
+    if [[ ! -f "$ROOT/build/CMakeCache.txt" ]]; then
+        set -- -S . -B build -DCMAKE_BUILD_TYPE=debug -DWITH_COVERAGE=1 "$@"
+    fi
+    docker_run -- cmake "$@"
+}
+
+cmd_make() {
+    local jobs
+    jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
+    if [[ ! -f "$ROOT/build/CMakeCache.txt" ]]; then
+        cmd_cmake
+    fi
+
+    docker_run -- make -C build -j"${jobs}" "$@"
+}
+
+cmd_unit() {
+    local filter="${1:-}"
+    local jobs
+    jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
+    if [[ ! -f "$ROOT/build/CMakeCache.txt" ]]; then
+        cmd_cmake
+    fi
+
+    docker_run --privileged -- bash -lc "
+        set -euo pipefail
+        if ! mountpoint -q /sys/fs/bpf 2>/dev/null; then
+            mount -t bpf bpffs /sys/fs/bpf
+        fi
+        make -C build -j${jobs} unit_bin
+        if [[ -n '${filter}' ]]; then
+            ctest --test-dir build --output-on-failure -L unit -R '${filter}'
+        else
+            ctest --test-dir build --output-on-failure -L unit
+        fi
+    "
+}
+
+cmd_e2e() {
+    local filter="${1:-}"
+    local jobs
+    jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
+    if [[ ! -f "$ROOT/build/CMakeCache.txt" ]]; then
+        cmd_cmake
+    fi
+
+    docker_run --privileged -- bash -lc "
+        set -euo pipefail
+        if ! mountpoint -q /sys/fs/bpf 2>/dev/null; then
+            mount -t bpf bpffs /sys/fs/bpf
+        fi
+        make -C build -j${jobs} e2e_bin bfcli
+        if [[ -n '${filter}' ]]; then
+            ctest --test-dir build --output-on-failure -L e2e -R '${filter}'
+        else
+            ctest --test-dir build --output-on-failure -L e2e
+        fi
+    "
+}
+
+cmd_run() {
+    if [[ "${1:-}" == "--" ]]; then
+        shift
+    fi
+    [[ $# -gt 0 ]] || die "usage: dev run [--] command..."
+    docker_run -- "$@"
+}
+
+usage() {
+    sed -n '2,22p' "$0" | tail -n +2
+}
+
+main() {
+    local cmd="${1:-shell}"
+    shift || true
+
+    case "$cmd" in
+    -h | --help | help) usage ;;
+    image) cmd_image "$@" ;;
+    shell) cmd_shell "$@" ;;
+    cmake) cmd_cmake "$@" ;;
+    make) cmd_make "$@" ;;
+    unit) cmd_unit "$@" ;;
+    e2e) cmd_e2e "$@" ;;
+    run) cmd_run "$@" ;;
+    *)
+        die "unknown command: $cmd\n$(usage)"
+        ;;
+    esac
+}
+
+main "$@"

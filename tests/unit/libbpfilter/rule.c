@@ -123,6 +123,36 @@ static void add_matcher(void **state)
         matcher1, bf_list_node_get_data(bf_list_get_tail(&rule->matchers))));
 }
 
+static void notrack_flag_pack_unpack(void **state)
+{
+    _free_bf_rule_ struct bf_rule *source = NULL;
+    _free_bf_rule_ struct bf_rule *destination = NULL;
+    _free_bf_wpack_ bf_wpack_t *wpack = NULL;
+    _free_bf_rpack_ bf_rpack_t *rpack = NULL;
+    bf_rpack_node_t node;
+    const void *data;
+    size_t data_len;
+
+    (void)state;
+
+    assert_ok(bf_rule_new(&source));
+    source->flags = BF_RULE_F_NOTRACK;
+    source->verdict = BF_VERDICT_ACCEPT;
+
+    assert_ok(bf_wpack_new(&wpack));
+    bf_wpack_open_object(wpack, "rule");
+    assert_ok(bf_rule_pack(source, wpack));
+    bf_wpack_close_object(wpack);
+    assert_ok(bf_wpack_get_data(wpack, &data, &data_len));
+
+    assert_ok(bf_rpack_new(&rpack, data, data_len));
+    assert_ok(bf_rpack_kv_obj(bf_rpack_root(rpack), "rule", &node));
+    assert_ok(bf_rule_new_from_pack(&destination, node));
+
+    assert_true(bf_rule_has_notrack(destination));
+    assert_int_equal(destination->flags, BF_RULE_F_NOTRACK);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -132,6 +162,7 @@ int main(void)
         cmocka_unit_test(unpack_error),
         cmocka_unit_test(dump),
         cmocka_unit_test(add_matcher),
+        cmocka_unit_test(notrack_flag_pack_unpack),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

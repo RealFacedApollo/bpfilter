@@ -54,6 +54,25 @@ int bf_bpf_prog_load(const char *name, enum bf_bpf_prog_type prog_type,
 int bf_bpf_map_lookup_elem(int fd, const void *key, void *value);
 
 /**
+ * @brief Get the next key in a BPF map.
+ *
+ * @param fd File descriptor of the map.
+ * @param key Previous key, or NULL to fetch the first key.
+ * @param next_key Output buffer for the next key. Can't be NULL.
+ * @return 0 on success, or a negative errno value on failure.
+ */
+int bf_bpf_map_get_next_key(int fd, const void *key, void *next_key);
+
+/**
+ * @brief Delete an element from a BPF map.
+ *
+ * @param fd File descriptor of the map.
+ * @param key Key of the element to delete. Can't be NULL.
+ * @return 0 on success, or a negative errno value on failure.
+ */
+int bf_bpf_map_delete_elem(int fd, const void *key);
+
+/**
  * @brief Get information about a BPF map.
  *
  * @param fd File descriptor of the map. Must be valid.

@@ -108,3 +108,29 @@ A full configuration (without any part disabled) will provide the following targ
 - ``benchmarks``: run the benchmarks on ``bpfilter``.
 
 The build artifacts are located in ``$BUILD_DIRECTORY/output``.
+
+Docker dev environment (macOS and other non-Linux hosts)
+--------------------------------------------------------
+
+``bpfilter`` requires Linux, ``libbpf``, and (for some tests) ``bpffs``. On
+macOS, use a persistent local Fedora dev image instead of reinstalling packages
+into a fresh container on every run:
+
+.. code-block:: shell
+
+    # One-time: build the dev image from the same Dockerfile CI uses (~5 min)
+    ./scripts/dev image
+
+    # Interactive shell (source + build/ mounted from the host)
+    ./scripts/dev shell
+
+    # Configure, build, and run unit tests (incremental after the first run)
+    ./scripts/dev cmake
+    ./scripts/dev make unit_bin
+    ./scripts/dev unit 'unit.libbpfilter.ct'
+
+    # Force refresh after .github/fedora-44.Dockerfile changes
+    ./scripts/dev image --rebuild
+
+The image is tagged ``bpfilter-dev:local`` by default. Override with
+``BPFILTER_DEV_IMAGE`` if needed.

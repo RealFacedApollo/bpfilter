@@ -113,6 +113,12 @@ int bf_rule_new_from_pack(struct bf_rule **rule, bf_rpack_node_t node)
     if (r)
         return bf_rpack_key_err(r, "bf_rule.verdict");
 
+    if (bf_rpack_kv_contains(node, "flags")) {
+        r = bf_rpack_kv_u8(node, "flags", &_rule->flags);
+        if (r)
+            return bf_rpack_key_err(r, "bf_rule.flags");
+    }
+
     if (bf_rpack_kv_contains(node, "redirect_ifindex")) {
         r = bf_rpack_kv_u32(node, "redirect_ifindex", &_rule->redirect_ifindex);
         if (r)
@@ -169,6 +175,8 @@ int bf_rule_pack(const struct bf_rule *rule, bf_wpack_t *pack)
     bf_wpack_kv_bool(pack, "has_counters", rule->has_counters);
     bf_wpack_kv_u64(pack, "mark", rule->mark);
     bf_wpack_kv_int(pack, "verdict", rule->verdict);
+    if (rule->flags)
+        bf_wpack_kv_u8(pack, "flags", rule->flags);
     bf_wpack_kv_u32(pack, "redirect_ifindex", rule->redirect_ifindex);
     bf_wpack_kv_int(pack, "redirect_dir", rule->redirect_dir);
 
@@ -213,6 +221,8 @@ void bf_rule_dump(const struct bf_rule *rule, prefix_t *prefix)
     }
 
     DUMP(prefix, "disabled: %s", rule->disabled ? "yes" : "no");
+    if (rule->flags)
+        DUMP(prefix, "flags: 0x%02x", rule->flags);
     DUMP(prefix, "mark: 0x%" PRIx64, rule->mark);
     DUMP(prefix, "verdict: %s", bf_verdict_to_str(rule->verdict));
     if (bf_rule_has_redirect(rule)) {

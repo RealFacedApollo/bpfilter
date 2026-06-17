@@ -170,6 +170,41 @@ enum bf_elfstub_id
      */
     BF_ELFSTUB_SOCK_ADDR_LOG,
 
+    /**
+     * Conntrack lookup — map select, normalize, direction, state derivation.
+     *
+     * `__u8 bf_ct_lookup(struct bf_runtime *ctx, struct bf_ct_lookup_args *args)`
+     *
+     * **Return** Rule-visible @c CT_STATE_* bitmask in @c r0.
+     */
+    BF_ELFSTUB_CT_LOOKUP,
+
+    /**
+     * Create a conntrack entry when state is @c CT_STATE_NEW.
+     *
+     * `__u8 bf_ct_create_if_new(struct bf_runtime *ctx,
+     *                          struct bf_ct_create_args *args)`
+     *
+     * **Return** 1 if an entry was created, 0 otherwise.
+     */
+    BF_ELFSTUB_CT_CREATE,
+
+    /**
+     * Advance the TCP internal FSM for an existing entry.
+     *
+     * `void bf_ct_update_tcp_state(struct ct_entry *entry,
+     *                              const struct tcphdr *tcp, __u8 is_reply)`
+     */
+    BF_ELFSTUB_CT_UPDATE_TCP,
+
+    /**
+     * Advance the SCTP internal FSM for an existing entry.
+     *
+     * `void bf_ct_update_sctp_state(struct ct_entry *entry, __u8 chunk_type,
+     *                               __u8 is_reply)`
+     */
+    BF_ELFSTUB_CT_UPDATE_SCTP,
+
     _BF_ELFSTUB_MAX,
 };
 

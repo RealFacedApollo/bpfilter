@@ -45,6 +45,9 @@ enum bf_chain_flags
     /** A rule will filter on IPv6 nexthdr field. */
     BF_CHAIN_STORE_NEXTHDR,
 
+    /** Chain uses conntrack lookup and/or implicit entry creation. */
+    BF_CHAIN_CONNTRACK,
+
     _BF_CHAIN_FLAGS_MAX,
 };
 

@@ -8,6 +8,7 @@
 #include <linux/bpf.h>
 #include <linux/bpf_common.h>
 #include <linux/limits.h>
+#include <linux/pkt_cls.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -25,6 +26,7 @@
 #include <bpfilter/core/hashset.h>
 #include <bpfilter/core/list.h>
 #include <bpfilter/counter.h>
+#include <bpfilter/ct.h>
 #include <bpfilter/ctx.h>
 #include <bpfilter/dump.h>
 #include <bpfilter/flavor.h>
@@ -40,6 +42,7 @@
 
 #include "cgen/cgroup_skb.h"
 #include "cgen/cgroup_sock_addr.h"
+#include "cgen/ct.h"
 #include "cgen/dump.h"
 #include "cgen/fixup.h"
 #include "cgen/handle.h"
@@ -264,6 +267,10 @@ int bf_program_new(struct bf_program **program, const struct bf_chain *chain,
     assert(chain);
     assert(handle);
 
+    r = bf_ct_validate_hook_compat(chain);
+    if (r)
+        return r;
+
     _program = calloc(1, sizeof(*_program));
     if (!_program)
         return -ENOMEM;
@@ -275,6 +282,7 @@ int bf_program_new(struct bf_program **program, const struct bf_chain *chain,
     _program->fixups = bf_list_default(bf_fixup_free, NULL);
     _program->set_groups = bf_list_default(_bf_set_group_free, NULL);
     _program->handle = handle;
+    _program->ctgen.segment_total = 1;
 
     r = bf_vector_reserve(&_program->img, 512);
     if (r)
@@ -455,6 +463,27 @@ static int _bf_program_fixup(struct bf_program *program,
             value = group->map->fd;
             break;
         }
+        case BF_FIXUP_TYPE_CT_MAP_FD: {
+            const struct bf_ct_maps *ct_maps = bf_ctx_get_ct_maps();
+
+            if (!ct_maps) {
+                return bf_err_r(-ENOENT,
+                                "conntrack map fixup but CT maps unavailable");
+            }
+            insn_type = BF_FIXUP_INSN_IMM;
+            value = bf_ct_maps_get_fd(ct_maps, fixup->attr.ct_map_id);
+            if (value < 0)
+                return value;
+            break;
+        }
+        case BF_FIXUP_TYPE_PROG_ARRAY_FD:
+            if (!program->handle->prog_array) {
+                return bf_err_r(-ENOENT,
+                                "prog_array fixup but map not initialized");
+            }
+            insn_type = BF_FIXUP_INSN_IMM;
+            value = program->handle->prog_array->fd;
+            break;
         case BF_FIXUP_ELFSTUB_CALL:
             insn_type = BF_FIXUP_INSN_IMM;
             offset = program->elfstubs_location[fixup->attr.elfstub_id] -
@@ -517,6 +546,11 @@ static int _bf_program_generate_rule(struct bf_program *program,
     assert(program->runtime.ops->gen_inline_log);
 
     if (rule->disabled)
+        return 0;
+
+    if (program->ctgen.rule_end &&
+        (rule->index < program->ctgen.rule_begin ||
+         rule->index >= program->ctgen.rule_end))
         return 0;
 
     bf_list_foreach (&rule->matchers, matcher_node) {
@@ -628,8 +662,16 @@ static int _bf_program_generate_rule(struct bf_program *program,
         EMIT_FIXUP_ELFSTUB(program, BF_ELFSTUB_UPDATE_COUNTERS);
     }
 
+    r = bf_ct_emit_update_fsm(program);
+    if (r)
+        return r;
+
     switch (rule->verdict) {
     case BF_VERDICT_ACCEPT:
+        r = bf_ct_emit_create_if_new(program, bf_rule_has_notrack(rule));
+        if (r)
+            return r;
+        /* fall through */
     case BF_VERDICT_DROP:
     case BF_VERDICT_NEXT:
         r = program->runtime.ops->get_verdict(rule->verdict, &ret_code);
@@ -861,6 +903,10 @@ int bf_program_generate(struct bf_program *program)
                                   BF_PROG_CTX_OFF(state_map)));
     }
 
+    r = bf_ct_emit_prologue(program);
+    if (r)
+        return r;
+
     bf_list_foreach (&chain->rules, rule_node) {
         r = _bf_program_generate_rule(program,
                                       bf_list_node_get_data(rule_node));
@@ -872,6 +918,24 @@ int bf_program_generate(struct bf_program *program)
     if (r)
         return r;
 
+    if (program->ctgen.segment_idx + 1 < program->ctgen.segment_total) {
+        r = bf_ct_emit_tail_call(program);
+        if (r)
+            return r;
+        EMIT(program, BPF_MOV64_IMM(BPF_REG_0, TCX_PASS));
+        EMIT(program, BPF_EXIT_INSN());
+
+        r = _bf_program_generate_elfstubs(program);
+        if (r)
+            return r;
+
+        r = _bf_program_fixup(program, BF_FIXUP_ELFSTUB_CALL);
+        if (r)
+            return bf_err_r(r, "failed to generate ELF stub call fixups");
+
+        return 0;
+    }
+
     // Call the update counters function
     /// @todo Allow chains to have no counters at all.
     EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
@@ -880,6 +944,12 @@ int bf_program_generate(struct bf_program *program)
     EMIT(program,
          BPF_MOV32_IMM(BPF_REG_3, bf_program_chain_counter_idx(program)));
     EMIT_FIXUP_ELFSTUB(program, BF_ELFSTUB_UPDATE_COUNTERS);
+
+    if (chain->policy == BF_VERDICT_ACCEPT) {
+        r = bf_ct_emit_create_if_new(program, false);
+        if (r)
+            return r;
+    }
 
     r = program->runtime.ops->get_verdict(chain->policy, &ret_code);
     if (r)
@@ -896,6 +966,195 @@ int bf_program_generate(struct bf_program *program)
         return bf_err_r(r, "failed to generate ELF stub call fixups");
 
     return 0;
+}
+
+static void _bf_program_reset_codegen(struct bf_program *program)
+{
+    bf_vector_clean(&program->img);
+    bf_vector_init(&program->img, sizeof(struct bpf_insn));
+    (void)bf_vector_reserve(&program->img, 512);
+    bf_list_clean(&program->fixups);
+    memset(program->elfstubs_location, 0, sizeof(program->elfstubs_location));
+}
+
+static void _bf_program_ctgen_for_segment(struct bf_program *program,
+                                            uint32_t seg, uint32_t n_seg,
+                                            uint32_t rules_per)
+{
+    program->ctgen.segment_idx = seg;
+    program->ctgen.segment_total = n_seg;
+    program->ctgen.rule_begin = seg * rules_per;
+    program->ctgen.rule_end =
+        seg + 1 >= n_seg ? 0 : (seg + 1) * rules_per;
+}
+
+int bf_program_generate_split(struct bf_program *program)
+{
+    const struct bf_chain *chain = program->runtime.chain;
+    size_t n_rules = bf_list_size(&chain->rules);
+    uint32_t n_seg;
+    uint32_t rules_per;
+    int r;
+
+    program->ctgen.segment_idx = 0;
+    program->ctgen.segment_total = 1;
+    program->ctgen.rule_begin = 0;
+    program->ctgen.rule_end = 0;
+
+    r = bf_program_generate(program);
+    if (r)
+        return r;
+
+    program->handle->n_segments = 1;
+
+    if (program->img.size <= BF_CT_PROG_SPLIT_INSNS ||
+        !bf_program_chain_uses_ct(program))
+        return 0;
+
+    n_seg = (uint32_t)((program->img.size + BF_CT_PROG_SPLIT_INSNS - 1) /
+                       BF_CT_PROG_SPLIT_INSNS);
+    if (n_seg < 2)
+        n_seg = 2;
+    if (n_seg > n_rules + 1)
+        n_seg = (uint32_t)(n_rules + 1);
+    if (n_seg > 32)
+        n_seg = 32;
+
+    rules_per = n_rules ? (uint32_t)((n_rules + n_seg - 1) / n_seg) : 1;
+    if (!rules_per)
+        rules_per = 1;
+
+    program->handle->n_segments = n_seg;
+    program->handle->ct_rules_per_segment = rules_per;
+
+    _bf_program_reset_codegen(program);
+    _bf_program_ctgen_for_segment(program, 0, n_seg, rules_per);
+
+    return bf_program_generate(program);
+}
+
+static int _bf_program_fixup_ct_maps(struct bf_program *program)
+{
+    int r;
+
+    r = _bf_program_fixup(program, BF_FIXUP_TYPE_CT_MAP_FD);
+    if (r)
+        return r;
+
+    if (program->handle->n_segments <= 1)
+        return 0;
+
+    return _bf_program_fixup(program, BF_FIXUP_TYPE_PROG_ARRAY_FD);
+}
+
+static int _bf_program_bpf_load(struct bf_program *prog, int *out_fd)
+{
+    _cleanup_free_ char *log_buf = NULL;
+    int r;
+
+    if (bf_ctx_is_verbose(BF_VERBOSE_DEBUG)) {
+        log_buf = malloc(_BF_LOG_BUF_SIZE);
+        if (!log_buf) {
+            return bf_err_r(-ENOMEM,
+                            "failed to allocate BPF_PROG_LOAD logs buffer");
+        }
+    }
+
+    if (bf_ctx_is_verbose(BF_VERBOSE_BYTECODE))
+        bf_program_dump_bytecode(prog);
+
+    r = bf_bpf_prog_load(prog->handle->prog_name,
+                         bf_hook_to_bpf_prog_type(prog->runtime.chain->hook),
+                         prog->img.data, prog->img.size,
+                         bf_hook_to_bpf_attach_type(prog->runtime.chain->hook),
+                         log_buf, log_buf ? _BF_LOG_BUF_SIZE : 0,
+                         bf_ctx_token(), out_fd);
+    if (r) {
+        return bf_err_r(r, "failed to load bf_program (%lu insns):\n%s\nerrno:",
+                        prog->img.size, log_buf ? log_buf : "<NO LOG BUFFER>");
+    }
+
+    return 0;
+}
+
+static void _bf_program_unload_segments(struct bf_handle *handle)
+{
+    assert(handle);
+
+    closep(&handle->prog_fd);
+
+    if (handle->segment_fds) {
+        for (uint32_t i = 0; i < handle->n_segments; ++i) {
+            if (handle->segment_fds[i] >= 0)
+                close(handle->segment_fds[i]);
+        }
+        free(handle->segment_fds);
+        handle->segment_fds = NULL;
+    }
+
+    bf_map_free(&handle->prog_array);
+}
+
+static int _bf_program_load_segments(struct bf_program *prog)
+{
+    uint32_t n_seg = prog->handle->n_segments;
+    uint32_t rules_per = prog->handle->ct_rules_per_segment;
+    int r;
+
+    _bf_program_unload_segments(prog->handle);
+
+    r = bf_map_new(&prog->handle->prog_array, "bf_prog_array",
+                   BF_MAP_TYPE_PROG_ARRAY, sizeof(uint32_t), sizeof(int),
+                   n_seg);
+    if (r) {
+        r = bf_err_r(r, "failed to create prog_array map");
+        goto err;
+    }
+
+    prog->handle->segment_fds = calloc(n_seg, sizeof(*prog->handle->segment_fds));
+    if (!prog->handle->segment_fds) {
+        r = -ENOMEM;
+        goto err;
+    }
+
+    for (uint32_t j = 0; j < n_seg; ++j)
+        prog->handle->segment_fds[j] = -1;
+
+    for (uint32_t i = 0; i < n_seg; ++i) {
+        uint32_t key = i;
+
+        if (i > 0) {
+            _bf_program_reset_codegen(prog);
+            _bf_program_ctgen_for_segment(prog, i, n_seg, rules_per);
+            r = bf_program_generate(prog);
+            if (r)
+                goto err;
+        }
+
+        r = _bf_program_fixup_ct_maps(prog);
+        if (r)
+            goto err;
+
+        r = _bf_program_bpf_load(prog, &prog->handle->segment_fds[i]);
+        if (r)
+            goto err;
+
+        r = bf_map_set_elem(prog->handle->prog_array, &key,
+                            &prog->handle->segment_fds[i]);
+        if (r) {
+            r = bf_err_r(r, "failed to populate prog_array[%u]", i);
+            goto err;
+        }
+    }
+
+    prog->handle->prog_fd = prog->handle->segment_fds[0];
+    prog->handle->segment_fds[0] = -1;
+
+    return 0;
+
+err:
+    _bf_program_unload_segments(prog->handle);
+    return r;
 }
 
 static int _bf_program_load_printer_map(struct bf_program *program)
@@ -1131,7 +1390,6 @@ static int _bf_program_load_sets_maps(struct bf_program *new_prog)
 
 int bf_program_load(struct bf_program *prog)
 {
-    _cleanup_free_ char *log_buf = NULL;
     int r;
 
     assert(prog);
@@ -1156,29 +1414,17 @@ int bf_program_load(struct bf_program *prog)
     if (r)
         return bf_err_r(r, "failed to load the state map");
 
-    if (bf_ctx_is_verbose(BF_VERBOSE_DEBUG)) {
-        log_buf = malloc(_BF_LOG_BUF_SIZE);
-        if (!log_buf) {
-            return bf_err_r(-ENOMEM,
-                            "failed to allocate BPF_PROG_LOAD logs buffer");
-        }
-    }
-
     if (bf_ctx_is_verbose(BF_VERBOSE_BYTECODE))
         bf_program_dump_bytecode(prog);
 
-    r = bf_bpf_prog_load(prog->handle->prog_name,
-                         bf_hook_to_bpf_prog_type(prog->runtime.chain->hook),
-                         prog->img.data, prog->img.size,
-                         bf_hook_to_bpf_attach_type(prog->runtime.chain->hook),
-                         log_buf, log_buf ? _BF_LOG_BUF_SIZE : 0,
-                         bf_ctx_token(), &prog->handle->prog_fd);
-    if (r) {
-        return bf_err_r(r, "failed to load bf_program (%lu insns):\n%s\nerrno:",
-                        prog->img.size, log_buf ? log_buf : "<NO LOG BUFFER>");
-    }
+    if (prog->handle->n_segments > 1)
+        return _bf_program_load_segments(prog);
 
-    return r;
+    r = _bf_program_fixup_ct_maps(prog);
+    if (r)
+        return bf_err_r(r, "failed to resolve CT map fixups");
+
+    return _bf_program_bpf_load(prog, &prog->handle->prog_fd);
 }
 
 int bf_program_get_counter(const struct bf_program *program,

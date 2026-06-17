@@ -19,6 +19,7 @@
 #include <bpfilter/verdict.h>
 
 #include "cgen/matcher/cmp.h"
+#include "cgen/ct.h"
 #include "cgen/packet.h"
 #include "cgen/program.h"
 #include "cgen/stub.h"
@@ -114,6 +115,8 @@ static int _bf_tc_gen_inline_matcher(struct bf_program *program,
 
         return bf_cmp_value(program, matcher, bf_matcher_payload(matcher), 4,
                             BPF_REG_0);
+    case BF_MATCHER_CONNTRACK:
+        return bf_ct_emit_match(program, matcher);
     default:
         return bf_packet_gen_inline_matcher(program, matcher);
     }

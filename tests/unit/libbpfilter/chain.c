@@ -5,6 +5,7 @@
 
 #include <bpfilter/chain.h>
 #include <bpfilter/core/list.h>
+#include <bpfilter/ct.h>
 #include <bpfilter/helper.h>
 #include <bpfilter/hook.h>
 #include <bpfilter/pack.h>
@@ -369,6 +370,135 @@ static void get_set_by_name(void **state)
     assert_null(bf_chain_get_set_by_name(chain, "bft_set_missing"));
 }
 
+static void conntrack_flag_ct_matcher(void **state)
+{
+    _free_bf_chain_ struct bf_chain *chain = NULL;
+    _clean_bf_list_ bf_list rules = bf_list_default(bf_rule_free, bf_rule_pack);
+    struct bf_rule *rule = NULL;
+    struct bf_match_ct_payload ct = {.state_mask = CT_STATE_ESTABLISHED};
+
+    (void)state;
+
+    assert_ok(bf_rule_new(&rule));
+    assert_ok(bf_rule_add_matcher(rule, BF_MATCHER_CONNTRACK, BF_MATCHER_EQ,
+                                  &ct, sizeof(ct), false));
+    rule->verdict = BF_VERDICT_DROP;
+    assert_ok(bf_list_add_tail(&rules, rule));
+
+    assert_ok(bf_chain_new(&chain, "ct", BF_HOOK_TC_INGRESS, BF_VERDICT_DROP,
+                           NULL, &rules));
+    assert_true(chain->flags & BF_FLAG(BF_CHAIN_CONNTRACK));
+}
+
+static void conntrack_flag_implicit_accept(void **state)
+{
+    _free_bf_chain_ struct bf_chain *chain = NULL;
+    _clean_bf_list_ bf_list rules = bf_list_default(bf_rule_free, bf_rule_pack);
+    struct bf_rule *rule = NULL;
+
+    (void)state;
+
+    assert_ok(bf_rule_new(&rule));
+    rule->verdict = BF_VERDICT_ACCEPT;
+    assert_ok(bf_list_add_tail(&rules, rule));
+
+    assert_ok(bf_chain_new(&chain, "ct", BF_HOOK_TC_INGRESS, BF_VERDICT_DROP,
+                           NULL, &rules));
+    assert_true(chain->flags & BF_FLAG(BF_CHAIN_CONNTRACK));
+}
+
+static void conntrack_flag_notrack_suppresses(void **state)
+{
+    _free_bf_chain_ struct bf_chain *chain = NULL;
+    _clean_bf_list_ bf_list rules = bf_list_default(bf_rule_free, bf_rule_pack);
+    struct bf_rule *rule = NULL;
+
+    (void)state;
+
+    assert_ok(bf_rule_new(&rule));
+    rule->verdict = BF_VERDICT_ACCEPT;
+    rule->flags = BF_RULE_F_NOTRACK;
+    assert_ok(bf_list_add_tail(&rules, rule));
+
+    assert_ok(bf_chain_new(&chain, "ct", BF_HOOK_TC_INGRESS, BF_VERDICT_DROP,
+                           NULL, &rules));
+    assert_false(chain->flags & BF_FLAG(BF_CHAIN_CONNTRACK));
+}
+
+static void conntrack_flag_policy_accept(void **state)
+{
+    _free_bf_chain_ struct bf_chain *chain = NULL;
+
+    (void)state;
+
+    assert_ok(bf_chain_new(&chain, "ct", BF_HOOK_TC_INGRESS, BF_VERDICT_ACCEPT,
+                           NULL, NULL));
+    assert_true(chain->flags & BF_FLAG(BF_CHAIN_CONNTRACK));
+}
+
+static void xdp_ct_matcher_rejected(void **state)
+{
+    _free_bf_chain_ struct bf_chain *chain = NULL;
+    _clean_bf_list_ bf_list rules = bf_list_default(bf_rule_free, bf_rule_pack);
+    struct bf_rule *rule = NULL;
+    struct bf_match_ct_payload ct = {.state_mask = CT_STATE_ESTABLISHED};
+
+    (void)state;
+
+    assert_ok(bf_rule_new(&rule));
+    assert_ok(bf_rule_add_matcher(rule, BF_MATCHER_CONNTRACK, BF_MATCHER_EQ,
+                                  &ct, sizeof(ct), false));
+    rule->verdict = BF_VERDICT_DROP;
+    assert_ok(bf_list_add_tail(&rules, rule));
+
+    assert_err(bf_chain_new(&chain, "xdp_ct", BF_HOOK_XDP, BF_VERDICT_DROP,
+                            NULL, &rules));
+}
+
+static void xdp_policy_accept_rejected(void **state)
+{
+    _free_bf_chain_ struct bf_chain *chain = NULL;
+
+    (void)state;
+
+    assert_err(bf_chain_new(&chain, "xdp_policy", BF_HOOK_XDP,
+                            BF_VERDICT_ACCEPT, NULL, NULL));
+}
+
+static void xdp_implicit_accept_rejected(void **state)
+{
+    _free_bf_chain_ struct bf_chain *chain = NULL;
+    _clean_bf_list_ bf_list rules = bf_list_default(bf_rule_free, bf_rule_pack);
+    struct bf_rule *rule = NULL;
+
+    (void)state;
+
+    assert_ok(bf_rule_new(&rule));
+    rule->verdict = BF_VERDICT_ACCEPT;
+    assert_ok(bf_list_add_tail(&rules, rule));
+
+    assert_err(bf_chain_new(&chain, "xdp_accept", BF_HOOK_XDP, BF_VERDICT_DROP,
+                            NULL, &rules));
+}
+
+static void xdp_notrack_ok(void **state)
+{
+    _free_bf_chain_ struct bf_chain *chain = NULL;
+    _clean_bf_list_ bf_list rules = bf_list_default(bf_rule_free, bf_rule_pack);
+    struct bf_rule *rule = NULL;
+
+    (void)state;
+
+    assert_ok(bf_rule_new(&rule));
+    rule->verdict = BF_VERDICT_ACCEPT;
+    rule->flags = BF_RULE_F_NOTRACK;
+    assert_ok(bf_list_add_tail(&rules, rule));
+
+    assert_ok(bf_chain_new(&chain, "xdp_ok", BF_HOOK_XDP, BF_VERDICT_DROP,
+                           NULL, &rules));
+    assert_false(chain->flags & BF_FLAG(BF_CHAIN_CONNTRACK));
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -383,6 +513,14 @@ int main(void)
         cmocka_unit_test(policy_validation),
         cmocka_unit_test(set_component_unsupported_hook),
         cmocka_unit_test(get_set_by_name),
+        cmocka_unit_test(conntrack_flag_ct_matcher),
+        cmocka_unit_test(conntrack_flag_implicit_accept),
+        cmocka_unit_test(conntrack_flag_notrack_suppresses),
+        cmocka_unit_test(conntrack_flag_policy_accept),
+        cmocka_unit_test(xdp_ct_matcher_rejected),
+        cmocka_unit_test(xdp_policy_accept_rejected),
+        cmocka_unit_test(xdp_implicit_accept_rejected),
+        cmocka_unit_test(xdp_notrack_ok),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

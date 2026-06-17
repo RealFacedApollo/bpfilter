@@ -7,6 +7,7 @@
 
 #include <linux/bpf.h>
 
+#include <bpfilter/ct.h>
 #include <bpfilter/runtime.h>
 
 /**
@@ -174,10 +175,25 @@ struct bf_runtime
 
     /** Scratch area. */
     __u8 bf_aligned(8) scratch[64];
+
+    /** Hoisted conntrack state (§10.1). Valid when chain uses CT. */
+    __u8 ct_state;
+    __u8 ct_is_reply;
+    __u8 ct_is_v6;
+    __u8 ct_hairpin_skip;
+
+    /** Pinned host-global CT maps (map FDs as pointers). */
+    struct bf_ct_bpf_maps ct_maps;
+
+    /** Normalized keys populated by @c bf_ct_lookup(). */
+    struct ct_key_v4 ct_key_v4;
+    struct ct_key_v6 ct_key_v6;
 };
 
 static_assert(sizeof(struct bf_runtime) % 8 == 0,
               "bf_runtime should be aligned to 8 bytes");
+static_assert(sizeof(struct bf_runtime) <= 512,
+              "bf_runtime exceeds BPF stack budget");
 
 extern void *bpf_dynptr_slice(const struct bpf_dynptr *, __u32, void *, __u32);
 extern int bpf_dynptr_from_xdp(struct xdp_md *, __u64, struct bpf_dynptr *);

@@ -14,6 +14,7 @@ set(libbpfilter_srcs
     ${CMAKE_CURRENT_SOURCE_DIR}/include/bpfilter/btf.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/bpfilter/chain.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/bpfilter/counter.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/bpfilter/ct.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/bpfilter/ctx.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/bpfilter/dump.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/bpfilter/elfstub.h
@@ -40,6 +41,12 @@ set(libbpfilter_srcs
     ${CMAKE_CURRENT_SOURCE_DIR}/cli.c
     ${CMAKE_CURRENT_SOURCE_DIR}/counter.c
     ${CMAKE_CURRENT_SOURCE_DIR}/ctx.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ct/key.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ct/maps.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ct/meta.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ct/timeout.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ct/gc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ct/validate.c
     ${CMAKE_CURRENT_SOURCE_DIR}/dump.c
     ${CMAKE_CURRENT_SOURCE_DIR}/cgen/elfstub.c
     ${CMAKE_CURRENT_SOURCE_DIR}/flavor.c
@@ -70,6 +77,7 @@ set(libbpfilter_srcs
     ${CMAKE_CURRENT_SOURCE_DIR}/cgen/matcher/cmp.h       ${CMAKE_CURRENT_SOURCE_DIR}/cgen/matcher/cmp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/cgen/matcher/meta.h      ${CMAKE_CURRENT_SOURCE_DIR}/cgen/matcher/meta.c
     ${CMAKE_CURRENT_SOURCE_DIR}/cgen/matcher/set.h       ${CMAKE_CURRENT_SOURCE_DIR}/cgen/matcher/set.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/cgen/ct.h                ${CMAKE_CURRENT_SOURCE_DIR}/cgen/ct.c
     ${CMAKE_CURRENT_SOURCE_DIR}/cgen/nf.h                ${CMAKE_CURRENT_SOURCE_DIR}/cgen/nf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/cgen/packet.h            ${CMAKE_CURRENT_SOURCE_DIR}/cgen/packet.c
     ${CMAKE_CURRENT_SOURCE_DIR}/cgen/printer.h           ${CMAKE_CURRENT_SOURCE_DIR}/cgen/printer.c
@@ -117,6 +125,10 @@ bf_target_add_elfstubs(libbpfilter
         "pkt_log"
         "flow_hash"
         "sock_addr_log"
+        "ct_lookup"
+        "ct_create"
+        "ct_update_tcp"
+        "ct_update_sctp"
 )
 
 target_compile_definitions(libbpfilter

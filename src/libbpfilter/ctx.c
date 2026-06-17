@@ -14,6 +14,7 @@
 #include <bpfilter/bpf.h>
 #include <bpfilter/btf.h>
 #include <bpfilter/chain.h>
+#include <bpfilter/ct.h>
 #include <bpfilter/core/list.h>
 #include <bpfilter/ctx.h>
 #include <bpfilter/dump.h>
@@ -50,6 +51,9 @@ struct bf_ctx
 
     /// Verbose flags.
     uint16_t verbose;
+
+    /// Host-global conntrack maps, when @ref BF_CTX_F_CONNTRACK is enabled.
+    struct bf_ct_maps *ct_maps;
 };
 
 static void _bf_ctx_free(struct bf_ctx **ctx);
@@ -163,6 +167,7 @@ static void _bf_ctx_free(struct bf_ctx **ctx)
         return;
 
     closep(&(*ctx)->token_fd);
+    bf_ct_maps_free(&(*ctx)->ct_maps);
     BF_FREEP(&(*ctx)->bpffs_path);
 
     for (enum bf_elfstub_id id = 0; id < _BF_ELFSTUB_MAX; ++id)
@@ -266,7 +271,31 @@ static void _bf_ctx_sweep_staging(void)
     }
 }
 
+static int _bf_ctx_init_conntrack(struct bf_ctx *ctx)
+{
+    _clean_bf_lock_ struct bf_lock lock = bf_lock_default();
+    int r;
+
+    assert(ctx);
+
+    r = bf_lock_init(&lock, BF_LOCK_WRITE);
+    if (r)
+        return bf_err_r(r, "failed to lock pindir for conntrack init");
+
+    r = bf_ct_maps_init(&ctx->ct_maps, lock.pindir_fd, NULL);
+    if (r)
+        return bf_err_r(r, "failed to initialize conntrack maps");
+
+    return 0;
+}
+
 int bf_ctx_setup(bool with_bpf_token, const char *bpffs_path, uint16_t verbose)
+{
+    return bf_ctx_setup_ex(with_bpf_token, bpffs_path, verbose, 0);
+}
+
+int bf_ctx_setup_ex(bool with_bpf_token, const char *bpffs_path,
+                    uint16_t verbose, uint32_t flags)
 {
     int r;
 
@@ -276,6 +305,14 @@ int bf_ctx_setup(bool with_bpf_token, const char *bpffs_path, uint16_t verbose)
     r = _bf_ctx_new(&_bf_global_ctx, with_bpf_token, bpffs_path, verbose);
     if (r)
         return bf_err_r(r, "failed to create new context");
+
+    if (flags & BF_CTX_F_CONNTRACK) {
+        r = _bf_ctx_init_conntrack(_bf_global_ctx);
+        if (r) {
+            _bf_ctx_free(&_bf_global_ctx);
+            return r;
+        }
+    }
 
     /* Reclaim any orphan staging directory left by a previous crash. */
     _bf_ctx_sweep_staging();
@@ -376,6 +413,9 @@ int bf_ctx_get_cgens(struct bf_lock *lock, bf_list **cgens)
                       sizeof(BF_LOCK_STAGING_PREFIX) - 1))
             continue;
 
+        if (bf_streq(entry->d_name, BF_CT_PIN_DIR))
+            continue;
+
         r = bf_lock_acquire_chain(lock, entry->d_name, BF_LOCK_READ, false);
         if (r) {
             bf_warn_r(r, "failed to acquire READ lock on chain '%s', skipping",
@@ -436,4 +476,12 @@ const char *bf_ctx_get_bpffs_path(void)
         return NULL;
 
     return _bf_global_ctx->bpffs_path;
+}
+
+struct bf_ct_maps *bf_ctx_get_ct_maps(void)
+{
+    if (!_bf_global_ctx)
+        return NULL;
+
+    return _bf_global_ctx->ct_maps;
 }

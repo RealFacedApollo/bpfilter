@@ -7,6 +7,8 @@
 
 #include <argp.h>
 #include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
 
 #include <bpfilter/bpfilter.h>
 #include <bpfilter/ctx.h>
@@ -15,6 +17,7 @@
 
 #include "bpfilter/core/list.h"
 #include "chain.h"
+#include "ct.h"
 #include "ruleset.h"
 
 /**
@@ -53,6 +56,7 @@ static int _bfc_action_argv_idx = 0;
 static const char * const _bfc_object_strs[] = {
     "ruleset", // BFC_OBJECT_RULESET
     "chain", // BFC_OBJECT_CHAIN
+    "ct", // BFC_OBJECT_CT
 };
 static_assert_enum_mapping(_bfc_object_strs, _BFC_OBJECT_MAX);
 
@@ -82,6 +86,9 @@ static const char * const _bfc_action_strs[] = {
     "update", // BFC_ACTION_UPDATE
     "update-set", // BFC_ACTION_UPDATE_SET
     "flush", // BFC_ACTION_FLUSH
+    "gc-sweep", // BFC_ACTION_GC_SWEEP
+    "gc-run", // BFC_ACTION_GC_RUN
+    "gc-status", // BFC_ACTION_GC_STATUS
 };
 static_assert_enum_mapping(_bfc_action_strs, _BFC_ACTION_MAX);
 
@@ -148,6 +155,9 @@ enum bfc_opts_option_id
     BFC_OPT_SET_REMOVE,
     BFC_OPT_DRY_RUN,
     BFC_OPT_NO_SET_CONTENT,
+    BFC_OPT_GC_INTERVAL,
+    BFC_OPT_GC_BATCH_SIZE,
+    BFC_OPT_GC_ONCE,
     _BFC_OPT_MAX,
 };
 
@@ -288,6 +298,37 @@ static const struct bfc_opts_cmd _bfc_opts_cmds[] = {
         .doc = "Delete a chain\vRemove a chain from the system.",
         .cb = bfc_chain_flush,
     },
+    {
+        .name = "bfcli ct gc sweep",
+        .object = BFC_OBJECT_CT,
+        .action = BFC_ACTION_GC_SWEEP,
+        .valid_opts = BF_FLAGS(BFC_OPT_HELP, BFC_OPT_USAGE, BFC_OPT_VERSION,
+                               BFC_OPT_GC_BATCH_SIZE, BFC_OPT_GC_ONCE),
+        .doc =
+            "Sweep conntrack maps\vRun one GC batch across all flow maps, or "
+            "a full pass with --once.",
+        .cb = bfc_ct_gc_sweep,
+    },
+    {
+        .name = "bfcli ct gc run",
+        .object = BFC_OBJECT_CT,
+        .action = BFC_ACTION_GC_RUN,
+        .valid_opts = BF_FLAGS(BFC_OPT_HELP, BFC_OPT_USAGE, BFC_OPT_VERSION,
+                               BFC_OPT_GC_INTERVAL, BFC_OPT_GC_BATCH_SIZE),
+        .doc = "Run the conntrack GC loop\vSweep flow maps periodically until "
+               "SIGINT or SIGTERM. Intended for supervision by an external "
+               "daemon.",
+        .cb = bfc_ct_gc_run,
+    },
+    {
+        .name = "bfcli ct gc status",
+        .object = BFC_OBJECT_CT,
+        .action = BFC_ACTION_GC_STATUS,
+        .valid_opts = BF_FLAGS(BFC_OPT_HELP, BFC_OPT_USAGE, BFC_OPT_VERSION),
+        .doc = "Print conntrack GC heartbeat\vReport key normalization "
+               "version and the timestamp of the last GC sweep batch.",
+        .cb = bfc_ct_gc_status,
+    },
 };
 
 static void _bfc_opts_help(struct argp_state *state, const char *arg,
@@ -381,14 +422,44 @@ static error_t _bfc_opts_parser(int key, char *arg, struct argp_state *state)
             if ((int)opts->object < 0)
                 argp_error(state, "unknown object '%s'", arg);
         } else if (state->arg_num == 1) {
-            opts->action = _bfc_action_from_str(arg);
-            if ((int)opts->action < 0)
-                argp_error(state, "unknown action '%s'", arg);
+            if (opts->object == BFC_OBJECT_CT) {
+                if (!bf_streq(arg, "gc"))
+                    argp_error(state,
+                               "unknown ct subcommand '%s' (expected 'gc')",
+                               arg);
+            } else {
+                opts->action = _bfc_action_from_str(arg);
+                if ((int)opts->action < 0)
+                    argp_error(state, "unknown action '%s'", arg);
+                opts->cmd = _bfc_opts_get_cmd(opts->object, opts->action);
+                if (!opts->cmd) {
+                    argp_error(state,
+                               "object '%s' does not support action '%s'",
+                               bfc_object_to_str(opts->object),
+                               bfc_action_to_str(opts->action));
+                }
+                _bfc_action_argv_idx = state->next - 1;
+                state->next = state->argc;
+            }
+        } else if (state->arg_num == 2) {
+            if (opts->object != BFC_OBJECT_CT)
+                return ARGP_ERR_UNKNOWN;
+
+            if (bf_streq(arg, "sweep"))
+                opts->action = BFC_ACTION_GC_SWEEP;
+            else if (bf_streq(arg, "run"))
+                opts->action = BFC_ACTION_GC_RUN;
+            else if (bf_streq(arg, "status"))
+                opts->action = BFC_ACTION_GC_STATUS;
+            else
+                argp_error(state,
+                           "unknown gc action '%s' (expected 'sweep', 'run', "
+                           "or 'status')",
+                           arg);
+
             opts->cmd = _bfc_opts_get_cmd(opts->object, opts->action);
             if (!opts->cmd) {
-                argp_error(state, "object '%s' does not support action '%s'",
-                           bfc_object_to_str(opts->object),
-                           bfc_action_to_str(opts->action));
+                argp_error(state, "ct gc does not support action '%s'", arg);
             }
             _bfc_action_argv_idx = state->next - 1;
             state->next = state->argc;
@@ -490,6 +561,43 @@ static void _bfc_opts_no_set_content(struct argp_state *state, const char *arg,
     (void)arg;
 
     opts->no_set_content = true;
+};
+
+static void _bfc_opts_gc_interval(struct argp_state *state, const char *arg,
+                                  struct bfc_opts *opts)
+{
+    unsigned long val;
+
+    (void)state;
+
+    val = strtoul(arg, NULL, 0);
+    if (val == 0 || val > UINT_MAX)
+        argp_error(state, "invalid --interval value '%s'", arg);
+
+    opts->gc_interval_sec = (unsigned)val;
+};
+
+static void _bfc_opts_gc_batch_size(struct argp_state *state, const char *arg,
+                                    struct bfc_opts *opts)
+{
+    unsigned long val;
+
+    (void)state;
+
+    val = strtoul(arg, NULL, 0);
+    if (val == 0 || val > UINT_MAX)
+        argp_error(state, "invalid --batch-size value '%s'", arg);
+
+    opts->gc_batch_size = (unsigned)val;
+};
+
+static void _bfc_opts_gc_once(struct argp_state *state, const char *arg,
+                              struct bfc_opts *opts)
+{
+    (void)state;
+    (void)arg;
+
+    opts->gc_once = true;
 };
 
 static struct bfc_opts_opt
@@ -618,6 +726,31 @@ static struct bfc_opts_opt
                "count.",
         .parser = _bfc_opts_no_set_content,
     },
+    {
+        .id = BFC_OPT_GC_INTERVAL,
+        .key = BFC_OPT_LONG_FLAG_ONLY(BFC_OPT_GC_INTERVAL),
+        .name = "interval",
+        .arg = "SEC",
+        .doc = "Seconds between GC batches (default: 10)",
+        .parser = _bfc_opts_gc_interval,
+    },
+    {
+        .id = BFC_OPT_GC_BATCH_SIZE,
+        .key = BFC_OPT_LONG_FLAG_ONLY(BFC_OPT_GC_BATCH_SIZE),
+        .name = "batch-size",
+        .arg = "N",
+        .doc = "Maximum entries to sweep per flow map per batch (default: "
+               "10000)",
+        .parser = _bfc_opts_gc_batch_size,
+    },
+    {
+        .id = BFC_OPT_GC_ONCE,
+        .key = BFC_OPT_LONG_FLAG_ONLY(BFC_OPT_GC_ONCE),
+        .name = "once",
+        .arg = NULL,
+        .doc = "Sweep all flow maps once before exiting",
+        .parser = _bfc_opts_gc_once,
+    },
 };
 
 #define _BF_OPT_ERR_MSG_LEN 256
@@ -739,6 +872,23 @@ int bfc_opts_parse(struct bfc_opts *opts, int argc, char **argv)
         BFC_HELP_ENTRY(BFC_ACTION_UPDATE, "Update an existing chain"),
         BFC_HELP_ENTRY(BFC_ACTION_UPDATE_SET, "Update a set in a chain"),
         BFC_HELP_ENTRY(BFC_ACTION_FLUSH, "Remove a chain"),
+        BFC_HELP_SECTION(BFC_OBJECT_CT),
+        {
+            .name = "gc sweep",
+            .doc = "Sweep conntrack flow maps (one batch, or --once for a "
+                   "full pass)",
+            .flags = OPTION_DOC,
+        },
+        {
+            .name = "gc run",
+            .doc = "Run the conntrack GC loop until interrupted",
+            .flags = OPTION_DOC,
+        },
+        {
+            .name = "gc status",
+            .doc = "Print GC heartbeat and key normalization version",
+            .flags = OPTION_DOC,
+        },
         {
             .name = "no-iptables",
             .key = BFC_OPT_LONG_FLAG_ONLY(_BFC_DEPRECATED_NO_IPTABLES),
@@ -802,7 +952,7 @@ int bfc_opts_parse(struct bfc_opts *opts, int argc, char **argv)
     static const struct argp parser = {
         .options = options,
         .parser = _bfc_opts_parser,
-        .args_doc = "OBJECT ACTION",
+        .args_doc = "OBJECT ACTION [SUBACTION]",
         .doc =
             "Configure bpfilter chains and filtering rules.\v"
             "Examples:\n"
@@ -813,7 +963,9 @@ int bfc_opts_parse(struct bfc_opts *opts, int argc, char **argv)
             "  # Get current ruleset\n"
             "  bfcli ruleset get\n\n"
             "  # Flush all rules\n"
-            "  bfcli ruleset flush\n",
+            "  bfcli ruleset flush\n\n"
+            "  # Run conntrack GC (for daemon supervision)\n"
+            "  bfcli ct gc run --interval 10 -b /sys/fs/bpf\n",
     };
     struct argp_option suboptions[_BFC_OPT_MAX + 1] = {};
     struct argp subparser = {.parser = _bfc_opts_cmd_parser};
@@ -839,9 +991,28 @@ int bfc_opts_parse(struct bfc_opts *opts, int argc, char **argv)
     subparser.options = !opts->cmd->valid_opts ? NULL : suboptions;
     subparser.doc = opts->cmd->doc;
 
-    (void)snprintf(_bfc_name, _BFC_NAME_LEN, "%s %s %s", argv[0],
-                   bfc_object_to_str(opts->object),
-                   bfc_action_to_str(opts->action));
+    if (opts->object == BFC_OBJECT_CT) {
+        const char *gc_action;
+
+        switch (opts->action) {
+        case BFC_ACTION_GC_RUN:
+            gc_action = "run";
+            break;
+        case BFC_ACTION_GC_STATUS:
+            gc_action = "status";
+            break;
+        default:
+            gc_action = "sweep";
+            break;
+        }
+
+        (void)snprintf(_bfc_name, _BFC_NAME_LEN, "%s ct gc %s", argv[0],
+                       gc_action);
+    } else {
+        (void)snprintf(_bfc_name, _BFC_NAME_LEN, "%s %s %s", argv[0],
+                       bfc_object_to_str(opts->object),
+                       bfc_action_to_str(opts->action));
+    }
     argv[_bfc_action_argv_idx] = _bfc_name;
     argc -= _bfc_action_argv_idx;
     argv += _bfc_action_argv_idx;

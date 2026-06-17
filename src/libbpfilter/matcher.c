@@ -802,6 +802,48 @@ static void _bf_print_icmpv6_type(const void *payload)
         (void)fprintf(stdout, "%" PRIu8, *(uint8_t *)payload);
 }
 
+static void _bf_print_ct_payload(const void *payload)
+{
+    const struct bf_match_ct_payload *ct = payload;
+
+    (void)fprintf(stdout, "state_mask=0x%02x invert=%u", ct->state_mask,
+                  ct->invert);
+}
+
+static int _bf_parse_ct_payload(enum bf_matcher_type type, enum bf_matcher_op op,
+                                void *payload, const char *raw_payload)
+{
+    struct bf_match_ct_payload *ct = payload;
+    unsigned long val;
+    char *end;
+
+    (void)type;
+
+    if (op != BF_MATCHER_EQ)
+        return -EINVAL;
+
+    if (!raw_payload || !*raw_payload)
+        return -EINVAL;
+
+    if (raw_payload[0] == '!') {
+        ct->invert = 1;
+        raw_payload++;
+    } else {
+        ct->invert = 0;
+    }
+
+    errno = 0;
+    val = strtoul(raw_payload, &end, 0);
+    if (errno || end == raw_payload || val > UINT8_MAX)
+        return -EINVAL;
+
+    ct->state_mask = (uint8_t)val;
+    ct->pad[0] = 0;
+    ct->pad[1] = 0;
+
+    return 0;
+}
+
 #define BF_MATCHER_OPS(op, payload_size, parse_cb, print_cb)                   \
     [op] = {payload_size, parse_cb, print_cb}
 
@@ -1259,6 +1301,18 @@ static struct bf_matcher_meta _bf_matcher_metas[_BF_MATCHER_TYPE_MAX] = {
         {
             .layer = BF_MATCHER_NO_LAYER,
         },
+    [BF_MATCHER_CONNTRACK] =
+        {
+            .layer = BF_MATCHER_NO_LAYER,
+            .unsupported_hooks = BF_FLAGS(BF_HOOK_XDP,
+                                           _BF_HOOKS_CGROUP_SOCK_ADDR_ALL),
+            .ops =
+                {
+                    BF_MATCHER_OPS(BF_MATCHER_EQ,
+                                   sizeof(struct bf_match_ct_payload),
+                                   _bf_parse_ct_payload, _bf_print_ct_payload),
+                },
+        },
 };
 
 const struct bf_matcher_meta *bf_matcher_get_meta(enum bf_matcher_type type)
@@ -1495,6 +1549,7 @@ static const char *_bf_matcher_type_strs[] = {
     [BF_MATCHER_ICMPV6_TYPE] = "icmpv6.type",
     [BF_MATCHER_ICMPV6_CODE] = "icmpv6.code",
     [BF_MATCHER_SET] = "<set>",
+    [BF_MATCHER_CONNTRACK] = "ct.conntrack",
 };
 
 static_assert_enum_mapping(_bf_matcher_type_strs, _BF_MATCHER_TYPE_MAX);
@@ -1511,6 +1566,11 @@ int bf_matcher_type_from_str(const char *str, enum bf_matcher_type *type)
 {
     assert(str);
     assert(type);
+
+    if (bf_streq(str, "ctstate") || bf_streq(str, "ct.conntrack")) {
+        *type = BF_MATCHER_CONNTRACK;
+        return 0;
+    }
 
     for (size_t i = 0; i < _BF_MATCHER_TYPE_MAX; ++i) {
         if (bf_streq(_bf_matcher_type_strs[i], str)) {
