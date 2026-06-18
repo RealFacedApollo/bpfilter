@@ -149,11 +149,16 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
         else if (pkt.proto == IPPROTO_GRE)
             src_disc = pkt.gre_key;
 
+        struct in6_addr lo;
+        struct in6_addr hi;
+
         bf_ct_bpf_key_normalize_v6(&pkt.src_v6, &pkt.dst_v6, src_disc,
                                    dst_disc, pkt.proto, key_v6,
                                    &orig_lo_is_src);
-        *is_reply = bf_ct_bpf_is_reply_v6(&pkt.src_v6, orig_lo_is_src,
-                                          &key_v6->lo_ip, &key_v6->hi_ip);
+        lo = key_v6->lo_ip;
+        hi = key_v6->hi_ip;
+        *is_reply = bf_ct_bpf_is_reply_v6(&pkt.src_v6, orig_lo_is_src, &lo,
+                                          &hi);
 
         entry = bf_ct_bpf_lookup_entry_v6(key_v6, pkt.proto, pkt.spi);
         if (!entry) {
@@ -165,12 +170,14 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
         }
 
         {
+            struct in6_addr lo6 = key_v6->lo_ip;
+            struct in6_addr hi6 = key_v6->hi_ip;
             __be32 lo_ip;
             __be32 hi_ip;
 
-            *is_reply = bf_ct_bpf_is_reply_v6(
-                &pkt.src_v6, entry->orig_lo_is_src, &key_v6->lo_ip,
-                &key_v6->hi_ip);
+            *is_reply = bf_ct_bpf_is_reply_v6(&pkt.src_v6,
+                                              entry->orig_lo_is_src, &lo6,
+                                              &hi6);
             __builtin_memcpy(&lo_ip, &key_v6->lo_ip.s6_addr[12],
                              sizeof(__be32));
             __builtin_memcpy(&hi_ip, &key_v6->hi_ip.s6_addr[12],
