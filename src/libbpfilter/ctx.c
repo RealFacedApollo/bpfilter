@@ -282,9 +282,18 @@ static int _bf_ctx_init_conntrack(struct bf_ctx *ctx)
     if (r)
         return bf_err_r(r, "failed to lock pindir for conntrack init");
 
+    /* Only reopen conntrack maps that are already pinned on the host. The
+     * maps are allocated lazily, the first time a chain that consults
+     * connection state is loaded (see bf_ctx_ensure_ct_maps()), so a purely
+     * stateless ruleset never allocates them. Reopening any pre-existing maps
+     * here lets ACCEPT chains keep feeding a table a previous consumer
+     * armed. */
+    if (!bf_ct_maps_exist(lock.pindir_fd))
+        return 0;
+
     r = bf_ct_maps_init(&ctx->ct_maps, lock.pindir_fd, NULL);
     if (r)
-        return bf_err_r(r, "failed to initialize conntrack maps");
+        return bf_err_r(r, "failed to open existing conntrack maps");
 
     return 0;
 }
@@ -484,4 +493,22 @@ struct bf_ct_maps *bf_ctx_get_ct_maps(void)
         return NULL;
 
     return _bf_global_ctx->ct_maps;
+}
+
+int bf_ctx_ensure_ct_maps(int pindir_fd)
+{
+    int r;
+
+    if (!_bf_global_ctx)
+        return bf_err_r(-EINVAL, "context is not initialized");
+
+    // Maps are host-global: create them once, then reuse for the process.
+    if (_bf_global_ctx->ct_maps)
+        return 0;
+
+    r = bf_ct_maps_init(&_bf_global_ctx->ct_maps, pindir_fd, NULL);
+    if (r)
+        return bf_err_r(r, "failed to create conntrack maps");
+
+    return 0;
 }

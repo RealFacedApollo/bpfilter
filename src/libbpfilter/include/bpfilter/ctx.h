@@ -41,6 +41,11 @@ enum bf_verbose
 /** Optional flags for @ref bf_ctx_setup_ex. */
 enum bf_ctx_flag
 {
+    /** Enable connection tracking support. Pre-existing pinned maps are
+     * reopened at setup; the maps themselves are created lazily, only once a
+     * chain that consults connection state is loaded (see
+     * @ref bf_ctx_ensure_ct_maps). A purely stateless ruleset allocates no
+     * conntrack memory. */
     BF_CTX_F_CONNTRACK = 1u << 0,
 };
 
@@ -153,7 +158,22 @@ bool bf_ctx_is_verbose(enum bf_verbose opt);
 const char *bf_ctx_get_bpffs_path(void);
 
 /**
- * @return Host-global conntrack maps, or NULL if @ref BF_CTX_F_CONNTRACK was
- *         not passed to @ref bf_ctx_setup_ex.
+ * @return Host-global conntrack maps, or NULL when conntrack has not been
+ *         armed (no chain consulting connection state has been loaded, and no
+ *         maps were pinned by a previous run).
  */
 struct bf_ct_maps *bf_ctx_get_ct_maps(void);
+
+/**
+ * @brief Lazily create the host-global conntrack maps if not present.
+ *
+ * Idempotent: returns immediately when the maps already exist (created earlier
+ * in this process or reopened at setup). Call this before generating a program
+ * for a chain that consults connection state, so the code generator can emit
+ * the conntrack datapath and resolve the map file descriptors.
+ *
+ * @param pindir_fd File descriptor for @c $BPFFS/bpfilter/, typically taken
+ *        from a held @ref bf_lock to avoid re-locking the pin directory.
+ * @return 0 on success, or a negative errno value on failure.
+ */
+int bf_ctx_ensure_ct_maps(int pindir_fd);

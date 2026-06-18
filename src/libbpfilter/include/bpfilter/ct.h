@@ -406,6 +406,19 @@ __u64 bf_ct_get_timeout_ns(const struct ct_entry *e,
 int bf_ct_validate_hook_compat(const struct bf_chain *chain);
 
 /**
+ * @brief Report whether a chain consults connection state.
+ *
+ * A chain "consumes" conntrack when at least one enabled rule carries a
+ * @c ct.conntrack matcher. This is the trigger for lazily creating the
+ * host-global conntrack maps: chains that merely accept traffic (and would
+ * implicitly create entries) do not arm conntrack on their own.
+ *
+ * @param chain Chain to inspect. Can't be NULL.
+ * @return true if the chain reads connection state, false otherwise.
+ */
+bool bf_ct_chain_consumes_ct(const struct bf_chain *chain);
+
+/**
  * @brief Emit load-time warnings for common conntrack policy mistakes (§18.1).
  *
  * @param chain Chain to inspect. Can't be NULL.
@@ -502,6 +515,17 @@ int bf_ct_maps_init(struct bf_ct_maps **maps, int pindir_fd,
  * @brief Reopen pinned conntrack maps from @c pindir_fd/ct/.
  */
 int bf_ct_maps_open(struct bf_ct_maps **maps, int pindir_fd);
+
+/**
+ * @brief Report whether conntrack maps are already pinned on the host.
+ *
+ * Probes @c pindir_fd/ct/ without creating the directory or any map, so it is
+ * safe to call before deciding whether to allocate the maps.
+ *
+ * @param pindir_fd File descriptor for @c $BPFFS/bpfilter/.
+ * @return true if the pinned maps exist, false otherwise.
+ */
+bool bf_ct_maps_exist(int pindir_fd);
 
 /**
  * @brief Release map file descriptors.

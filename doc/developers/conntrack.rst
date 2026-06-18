@@ -8,6 +8,35 @@ Connection tracking (conntrack) adds stateful filtering to bpfilter via the
 For rule syntax and examples, see :doc:`../usage/bfcli` (Connection tracking
 section).
 
+Lazy map creation (opt-in)
+--------------------------
+
+Conntrack maps are not created eagerly. A purely stateless ruleset never
+allocates them, so the conntrack feature costs no kernel memory until it is
+actually used.
+
+The trigger is a *consumer*: a chain with at least one ``ct.conntrack``
+matcher (``bf_ct_chain_consumes_ct()``). The first time such a chain is
+loaded, ``bf_ctx_ensure_ct_maps()`` creates and pins the maps. Chains that
+merely accept traffic (and would implicitly create entries) do not arm
+conntrack on their own.
+
+Once the maps exist, they are reopened at context setup
+(``_bf_ctx_init_conntrack()`` via ``bf_ct_maps_exist()``), so ``ACCEPT``
+chains loaded later keep feeding the shared table a previous consumer armed.
+This matches netfilter semantics: the host either tracks connections or it
+does not, decided globally by whether any rule consults connection state.
+
+Production of entries stays gated on the maps existing:
+``bf_program_chain_uses_ct()`` returns false while ``bf_ctx_get_ct_maps()`` is
+``NULL``, so the code generator emits no conntrack datapath for a chain when
+nothing on the host has armed conntrack — even if that chain carries the
+``BF_CHAIN_CONNTRACK`` flag from an ``ACCEPT`` rule or policy.
+
+The maps are never freed automatically when the last consumer is removed;
+they persist (surviving program reloads) until the pinned directory under
+``$BPFFS/bpfilter/ct/`` is removed manually.
+
 Program reload
 --------------
 

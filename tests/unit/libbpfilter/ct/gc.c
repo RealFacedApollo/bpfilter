@@ -14,6 +14,7 @@
 #include <bpfilter/ct.h>
 #include <bpfilter/ctx.h>
 
+#include "core/lock.h"
 #include "test.h"
 
 static __be32 _be32(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
@@ -37,6 +38,7 @@ static void _bft_require_bpffs(void)
 
 static int _bft_setup_ctx_bpffs_ct(void **state)
 {
+    _clean_bf_lock_ struct bf_lock lock = bf_lock_default();
     _free_bft_tmpdir_ struct bft_tmpdir *tmpdir = NULL;
     int r;
 
@@ -48,6 +50,13 @@ static int _bft_setup_ctx_bpffs_ct(void **state)
     bf_ctx_teardown();
     r = bf_ctx_setup_ex(false, "/sys/fs/bpf", 0, BF_CTX_F_CONNTRACK);
     if (r)
+        skip();
+
+    // Conntrack maps are created lazily; arm them so the GC tests operate on a
+    // populated map set.
+    if (bf_lock_init(&lock, BF_LOCK_WRITE))
+        skip();
+    if (bf_ctx_ensure_ct_maps(lock.pindir_fd))
         skip();
 
     return 0;

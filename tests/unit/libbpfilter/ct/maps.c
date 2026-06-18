@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <unistd.h>
 
+#include "core/lock.h"
 #include "test.h"
 
 static void _bft_require_bpffs(void)
@@ -65,12 +66,19 @@ static void ctx_ct_maps_disabled(void **state)
     assert_null(bf_ctx_get_ct_maps());
 }
 
-static void ctx_ct_maps_enabled(void **state)
+static void ctx_ct_maps_lazy(void **state)
 {
+    _clean_bf_lock_ struct bf_lock lock = bf_lock_default();
     const struct bf_ct_maps *ct_maps;
     int fd;
 
     (void)state;
+
+    // Maps are created lazily: arming them makes them available, and a second
+    // call is idempotent.
+    assert_ok(bf_lock_init(&lock, BF_LOCK_WRITE));
+
+    assert_ok(bf_ctx_ensure_ct_maps(lock.pindir_fd));
 
     ct_maps = bf_ctx_get_ct_maps();
     assert_non_null(ct_maps);
@@ -82,6 +90,9 @@ static void ctx_ct_maps_enabled(void **state)
     assert_int_gte(fd, 0);
 
     assert_int_equal(bf_ct_maps_get_fd(ct_maps, _BF_CT_MAP_MAX), -EINVAL);
+
+    assert_ok(bf_ctx_ensure_ct_maps(lock.pindir_fd));
+    assert_ptr_equal(bf_ctx_get_ct_maps(), ct_maps);
 }
 
 int main(void)
@@ -90,7 +101,7 @@ int main(void)
         cmocka_unit_test(maps_init_invalid_fd),
         cmocka_unit_test_setup_teardown(ctx_ct_maps_disabled, bft_setup_ctx,
                                         bft_teardown_ctx),
-        cmocka_unit_test_setup_teardown(ctx_ct_maps_enabled,
+        cmocka_unit_test_setup_teardown(ctx_ct_maps_lazy,
                                         _bft_setup_ctx_bpffs_ct,
                                         _bft_teardown_ctx_bpffs),
     };

@@ -22,6 +22,7 @@
 #include "cgen/handle.h"
 #include "cgen/program.h"
 #include "cgen/runtime.h"
+#include "core/lock.h"
 #include "mock.h"
 #include "test.h"
 
@@ -33,12 +34,20 @@ static void _bft_require_bpffs(void)
 
 static void _bft_ctx_setup_ct_or_skip(void)
 {
+    _clean_bf_lock_ struct bf_lock lock = bf_lock_default();
     int r;
 
     _bft_require_bpffs();
     bf_ctx_teardown();
     r = bf_ctx_setup_ex(false, "/sys/fs/bpf", 0, BF_CTX_F_CONNTRACK);
     if (r)
+        skip();
+
+    // Conntrack maps are created lazily; arm them explicitly so the code
+    // generator emits the conntrack datapath for these codegen tests.
+    if (bf_lock_init(&lock, BF_LOCK_WRITE))
+        skip();
+    if (bf_ctx_ensure_ct_maps(lock.pindir_fd))
         skip();
 }
 

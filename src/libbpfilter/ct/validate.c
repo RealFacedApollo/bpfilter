@@ -112,6 +112,13 @@ static bool _bf_ct_chain_has_ct_matcher(const struct bf_chain *chain)
     return false;
 }
 
+bool bf_ct_chain_consumes_ct(const struct bf_chain *chain)
+{
+    assert(chain);
+
+    return _bf_ct_chain_has_ct_matcher(chain);
+}
+
 int bf_ct_validate_hook_compat(const struct bf_chain *chain)
 {
     assert(chain);

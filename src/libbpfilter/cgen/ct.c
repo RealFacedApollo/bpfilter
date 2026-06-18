@@ -38,9 +38,10 @@ static int _bf_ct_emit_store_map_ptr(struct bf_program *program, int reg,
                                      enum bf_ct_map_id map_id, int field_off)
 {
     EMIT_LOAD_CT_MAP_FD_FIXUP(program, reg, map_id);
-    EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
-    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, field_off));
-    EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_1, reg, 0));
+    /* Spill the map pointer with a direct r10-relative store. An indirect
+     * store (through a computed pointer) is not tracked as a typed spill, so
+     * the map type is lost and a later bpf_map_lookup_elem() sees a scalar. */
+    EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, reg, field_off));
 
     return 0;
 }
@@ -162,10 +163,12 @@ static int _bf_ct_emit_lookup_call(struct bf_program *program)
                              0));
     EMIT(program, BPF_ST_MEM(BPF_B, BPF_REG_10, _BF_CT_RUNTIME_OFF(ct_is_v6), 0));
 
+    /* lo_ip and hi_ip are adjacent 4-byte fields: a single 8-byte store zeroes
+     * both while keeping the stack access 8-byte aligned. Storing hi_ip
+     * separately as a double word would land on a 4-byte-aligned offset and
+     * the verifier rejects it ("misaligned stack access"). */
     EMIT(program, BPF_ST_MEM(BPF_DW, BPF_REG_10,
                              _BF_CT_RUNTIME_OFF(ct_key_v4.lo_ip), 0));
-    EMIT(program, BPF_ST_MEM(BPF_DW, BPF_REG_10,
-                             _BF_CT_RUNTIME_OFF(ct_key_v4.hi_ip), 0));
     EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10,
                              _BF_CT_RUNTIME_OFF(ct_key_v4.discriminator), 0));
     /* Word store covers proto and the 3 padding bytes: the whole key must be
@@ -364,6 +367,69 @@ int bf_ct_emit_scratch_restore(struct bf_program *program)
     return _bf_ct_emit_lookup_call(program);
 }
 
+static int _bf_ct_emit_zero_range(struct bf_program *program, int off, int len)
+{
+    int i = 0;
+
+    for (; i + 8 <= len; i += 8)
+        EMIT(program, BPF_ST_MEM(BPF_DW, BPF_REG_10, off + i, 0));
+    for (; i + 4 <= len; i += 4)
+        EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10, off + i, 0));
+
+    return 0;
+}
+
+/* Copy a packet header from the dynptr into an embedded runtime buffer so the
+ * CT subprogram can read it as struct memory (see bf_ct_bpf_l3/l4). The buffer
+ * is zeroed first, so a truncated header reads as zero rather than as
+ * uninitialized stack. The length is clamped to the buffer size to keep the
+ * read in-bounds for the verifier. */
+static int _bf_ct_emit_copy_hdr(struct bf_program *program, int dst_off,
+                                int size_off, int offset_off, int slice_len)
+{
+    int r;
+
+    r = _bf_ct_emit_zero_range(program, dst_off, slice_len);
+    if (r)
+        return r;
+
+    // len = min(*size_off, slice_len)
+    EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_2, BPF_REG_10, size_off));
+    {
+        _clean_bf_jmpctx_ struct bf_jmpctx fits =
+            bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JLE, BPF_REG_2, slice_len, 0));
+
+        EMIT(program, BPF_MOV64_IMM(BPF_REG_2, slice_len));
+        (void)fits;
+    }
+
+    // bpf_dynptr_read(dst, len, &dynptr, offset, 0)
+    EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
+    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, dst_off));
+    EMIT(program, BPF_MOV64_REG(BPF_REG_3, BPF_REG_10));
+    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_3, _BF_CT_RUNTIME_OFF(dynptr)));
+    EMIT(program, BPF_LDX_MEM(BPF_W, BPF_REG_4, BPF_REG_10, offset_off));
+    EMIT(program, BPF_MOV64_IMM(BPF_REG_5, 0));
+    EMIT(program, BPF_EMIT_CALL(BPF_FUNC_dynptr_read));
+
+    return 0;
+}
+
+static int _bf_ct_emit_copy_headers(struct bf_program *program)
+{
+    int r;
+
+    r = _bf_ct_emit_copy_hdr(program, _BF_CT_RUNTIME_OFF(l3),
+                             _BF_CT_RUNTIME_OFF(l3_size),
+                             _BF_CT_RUNTIME_OFF(l3_offset), BF_L3_SLICE_LEN);
+    if (r)
+        return r;
+
+    return _bf_ct_emit_copy_hdr(program, _BF_CT_RUNTIME_OFF(l4),
+                                _BF_CT_RUNTIME_OFF(l4_size),
+                                _BF_CT_RUNTIME_OFF(l4_offset), BF_L4_SLICE_LEN);
+}
+
 int bf_ct_emit_prologue(struct bf_program *program)
 {
     int cb_off;
@@ -371,6 +437,10 @@ int bf_ct_emit_prologue(struct bf_program *program)
 
     if (!bf_program_chain_uses_ct(program))
         return 0;
+
+    r = _bf_ct_emit_copy_headers(program);
+    if (r)
+        return r;
 
     if (_bf_ct_hook_has_skb(program->runtime.chain->hook)) {
         r = bf_btf_get_field_off("__sk_buff", "cb");

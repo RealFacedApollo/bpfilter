@@ -74,7 +74,14 @@ bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
         entry.internal_state = bf_ct_bpf_initial_sctp_state(pkt);
 
     flow_map = bf_ct_bpf_flow_map(maps, 0, pkt->proto);
-    r = bpf_map_update_elem(flow_map, key, &entry, BPF_NOEXIST);
+    {
+        /* Insert with a local key copy: passing the caller-frame key pointer
+         * to bpf_map_update_elem() scalarizes the caller's spilled map
+         * pointers, breaking the map accesses below. */
+        struct ct_key_v4 local = *key;
+
+        r = bpf_map_update_elem(flow_map, &local, &entry, BPF_NOEXIST);
+    }
     if (r)
         return 0;
 
@@ -123,7 +130,12 @@ bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
         entry.internal_state = bf_ct_bpf_initial_sctp_state(pkt);
 
     flow_map = bf_ct_bpf_flow_map(maps, 1, pkt->proto);
-    r = bpf_map_update_elem(flow_map, key, &entry, BPF_NOEXIST);
+    {
+        /* See bf_ct_bpf_create_entry_v4(): insert with a local key copy. */
+        struct ct_key_v6 local = *key;
+
+        r = bpf_map_update_elem(flow_map, &local, &entry, BPF_NOEXIST);
+    }
     if (r)
         return 0;
 

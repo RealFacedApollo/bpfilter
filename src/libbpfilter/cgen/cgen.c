@@ -319,6 +319,12 @@ int bf_cgen_set(struct bf_cgen *cgen, struct bf_hookopts **hookopts,
     assert(cgen);
     assert(lock);
 
+    if (bf_ct_chain_consumes_ct(cgen->chain)) {
+        r = bf_ctx_ensure_ct_maps(lock->pindir_fd);
+        if (r)
+            return r;
+    }
+
     r = bf_program_new(&prog, cgen->chain, cgen->handle);
     if (r < 0)
         return r;
@@ -358,6 +364,12 @@ int bf_cgen_load(struct bf_cgen *cgen, struct bf_lock *lock)
 
     assert(cgen);
     assert(lock);
+
+    if (bf_ct_chain_consumes_ct(cgen->chain)) {
+        r = bf_ctx_ensure_ct_maps(lock->pindir_fd);
+        if (r)
+            return r;
+    }
 
     r = bf_program_new(&prog, cgen->chain, cgen->handle);
     if (r < 0)
@@ -482,6 +494,12 @@ int bf_cgen_update(struct bf_cgen *cgen, struct bf_chain **new_chain,
 
     if (bf_ctx_get_ct_maps()) {
         r = bf_ct_maps_check_reload(bf_ctx_get_ct_maps());
+        if (r)
+            return r;
+    }
+
+    if (bf_ct_chain_consumes_ct(*new_chain)) {
+        r = bf_ctx_ensure_ct_maps(lock->pindir_fd);
         if (r)
             return r;
     }

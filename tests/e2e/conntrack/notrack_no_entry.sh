@@ -6,12 +6,16 @@ make_sandbox
 
 PORT=18083
 
+# A leading ct.conntrack rule arms conntrack (creates the host-global maps);
+# the probe flow is marked notrack and must not create an entry despite that.
 ${FROM_NS} ${BFCLI} chain set --from-str \
     "chain ct_ing BF_HOOK_TC_INGRESS{ifindex=${NS_IFINDEX}} DROP \
+     rule ct.conntrack eq 0x6 ACCEPT \
      rule udp.dport eq ${PORT} notrack ACCEPT"
 
 ${FROM_NS} ${BFCLI} chain set --from-str \
     "chain ct_egr BF_HOOK_TC_EGRESS{ifindex=${NS_IFINDEX}} DROP \
+     rule ct.conntrack eq 0x6 ACCEPT \
      rule udp.sport eq ${PORT} notrack ACCEPT"
 
 ${FROM_NS} nc -u -l -p ${PORT} >/dev/null &

@@ -54,6 +54,12 @@ function(bf_target_add_elfstubs TARGET)
                     -O2
                     -target bpf
                     -g
+                    # Real BPF builds must call helpers through libbpf's
+                    # helper-id declarations; the bare-extern fallback in
+                    # ct/bpf/helpers.h is for the host unit-test harness only
+                    # and makes libbpf misresolve helpers (e.g. ktime_get_ns)
+                    # as kfuncs.
+                    -D BF_CT_BPF_WITH_LIBBPF_HELPERS
                     -I ${CMAKE_SOURCE_DIR}/src/libbpfilter/include
                     -I ${CMAKE_SOURCE_DIR}/src/libbpfilter
                     -I ${CMAKE_SOURCE_DIR}/src/external/include

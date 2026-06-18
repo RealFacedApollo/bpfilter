@@ -23,20 +23,25 @@ static __always_inline struct ct_entry *
 bf_ct_bpf_lookup_entry_v4(const struct bf_ct_bpf_maps *maps,
                           struct ct_key_v4 *key, __u8 proto, __u32 spi)
 {
+    /* Look up with a local copy of the key. Passing the caller-frame key
+     * pointer (&ctx->ct_key_v4) to bpf_map_lookup_elem() makes the verifier
+     * scalarize the caller frame's spilled map pointers, breaking every
+     * subsequent map access in the subprogram. */
+    struct ct_key_v4 local = *key;
     struct ct_spi_reverse_key rev_key = {};
     struct ct_entry *entry;
     void *map = bf_ct_bpf_flow_map(maps, 0, proto);
     __u32 *orig_spi;
 
-    entry = bpf_map_lookup_elem(map, key);
+    entry = bpf_map_lookup_elem(map, &local);
     if (entry)
         return entry;
 
     if (proto != IPPROTO_ESP && proto != IPPROTO_AH)
         return NULL;
 
-    rev_key.lo_ip = key->lo_ip;
-    rev_key.hi_ip = key->hi_ip;
+    rev_key.lo_ip = local.lo_ip;
+    rev_key.hi_ip = local.hi_ip;
     rev_key.reply_spi = spi;
     rev_key.proto = proto;
 
@@ -44,28 +49,32 @@ bf_ct_bpf_lookup_entry_v4(const struct bf_ct_bpf_maps *maps,
     if (!orig_spi)
         return NULL;
 
+    local.discriminator = *orig_spi;
     key->discriminator = *orig_spi;
-    return bpf_map_lookup_elem(map, key);
+    return bpf_map_lookup_elem(map, &local);
 }
 
 static __always_inline struct ct_entry *
 bf_ct_bpf_lookup_entry_v6(const struct bf_ct_bpf_maps *maps,
                           struct ct_key_v6 *key, __u8 proto, __u32 spi)
 {
+    /* See bf_ct_bpf_lookup_entry_v4(): look up with a local key copy so the
+     * caller-frame map pointers stay valid. */
+    struct ct_key_v6 local = *key;
     struct ct_spi_reverse_key rev_key = {};
     struct ct_entry *entry;
     void *map = bf_ct_bpf_flow_map(maps, 1, proto);
     __u32 *orig_spi;
 
-    entry = bpf_map_lookup_elem(map, key);
+    entry = bpf_map_lookup_elem(map, &local);
     if (entry)
         return entry;
 
     if (proto != IPPROTO_ESP && proto != IPPROTO_AH)
         return NULL;
 
-    __builtin_memcpy(&rev_key.lo_ip, &key->lo_ip.s6_addr[12], sizeof(__be32));
-    __builtin_memcpy(&rev_key.hi_ip, &key->hi_ip.s6_addr[12], sizeof(__be32));
+    __builtin_memcpy(&rev_key.lo_ip, &local.lo_ip.s6_addr[12], sizeof(__be32));
+    __builtin_memcpy(&rev_key.hi_ip, &local.hi_ip.s6_addr[12], sizeof(__be32));
     rev_key.reply_spi = spi;
     rev_key.proto = proto;
 
@@ -73,8 +82,9 @@ bf_ct_bpf_lookup_entry_v6(const struct bf_ct_bpf_maps *maps,
     if (!orig_spi)
         return NULL;
 
+    local.discriminator = *orig_spi;
     key->discriminator = *orig_spi;
-    return bpf_map_lookup_elem(map, key);
+    return bpf_map_lookup_elem(map, &local);
 }
 
 static __always_inline __u8

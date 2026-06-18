@@ -28,8 +28,12 @@ struct bf_ct_gre_hdr
     __be16 protocol;
 };
 
-#ifdef BF_CT_BPF_HARNESS
-
+/* The CT stubs run as a separate BPF subprogram. A header pointer obtained
+ * from bpf_dynptr_slice() in the main program loses its verifier provenance
+ * once it is spilled to the runtime struct and reloaded in the callee frame,
+ * so the stub cannot dereference ctx->l3_hdr / ctx->l4_hdr directly. The main
+ * program instead copies the header bytes into these embedded buffers (see
+ * the CT prologue), which the stub reads as plain struct memory. */
 static __always_inline const void *bf_ct_bpf_l3(const struct bf_runtime *ctx)
 {
     return ctx->l3;
@@ -37,25 +41,21 @@ static __always_inline const void *bf_ct_bpf_l3(const struct bf_runtime *ctx)
 
 static __always_inline const void *bf_ct_bpf_l4(const struct bf_runtime *ctx)
 {
+#ifdef BF_CT_BPF_HARNESS
+    /* The harness builds the runtime in a map value and stages large L4
+     * headers (e.g. ICMP-error inner packets) in the scratch area. */
     if (ctx->l4_size <= BF_L4_SLICE_LEN)
         return ctx->l4;
 
     return ctx->scratch;
-}
-
 #else
-
-static __always_inline const void *bf_ct_bpf_l3(const struct bf_runtime *ctx)
-{
-    return ctx->l3_hdr;
-}
-
-static __always_inline const void *bf_ct_bpf_l4(const struct bf_runtime *ctx)
-{
-    return ctx->l4_hdr;
-}
-
+    /* Real datapath: always read from the embedded l4 copy (filled by the CT
+     * prologue). The scratch area can't be used as an L4 fallback here: it
+     * doubles as the lookup-args buffer and holds spilled pointers, which the
+     * verifier refuses to read back as packet data. */
+    return ctx->l4;
 #endif
+}
 
 static __always_inline __u32 bf_ct_bpf_parse_gre_key(const struct bf_runtime *ctx)
 {

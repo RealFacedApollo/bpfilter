@@ -28,6 +28,7 @@
 #include "cgen/fixup.h"
 #include "cgen/handle.h"
 #include "cgen/program.h"
+#include "core/lock.h"
 #include "test.h"
 
 #define _BFT_CT_SPLIT_FILLER_RULES 288u
@@ -121,12 +122,19 @@ static bool _bft_ct_has_prog_array_fixup(const struct bf_program *program)
 
 static void _bft_ctx_setup_ct_or_skip(void)
 {
+    _clean_bf_lock_ struct bf_lock lock = bf_lock_default();
     int r;
 
     _bft_require_linux();
     bf_ctx_teardown();
     r = bf_ctx_setup_ex(false, "/sys/fs/bpf", 0, BF_CTX_F_CONNTRACK);
     _bft_skip_without_bpf(r);
+
+    // Conntrack maps are created lazily; arm them so codegen emits the
+    // conntrack datapath and the load tests find a populated map set.
+    if (bf_lock_init(&lock, BF_LOCK_WRITE))
+        skip();
+    _bft_skip_without_bpf(bf_ctx_ensure_ct_maps(lock.pindir_fd));
 }
 
 static int _bft_example_chain(struct bf_chain **chain)

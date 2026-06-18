@@ -507,6 +507,28 @@ int bf_ct_maps_open(struct bf_ct_maps **maps, int pindir_fd)
     return bf_ct_maps_init(maps, pindir_fd, NULL);
 }
 
+bool bf_ct_maps_exist(int pindir_fd)
+{
+    _cleanup_close_ int ct_dir_fd = -1;
+    _cleanup_close_ int map_fd = -1;
+    int r;
+
+    if (pindir_fd < 0)
+        return false;
+
+    // Open the conntrack pin directory without creating it.
+    r = bf_opendir_at(pindir_fd, BF_CT_PIN_DIR, false);
+    if (r < 0)
+        return false;
+    ct_dir_fd = r;
+
+    // ct_meta is created alongside every other map, so its presence is a
+    // reliable proxy for "the conntrack maps are pinned".
+    r = bf_bpf_obj_get("ct_meta", ct_dir_fd, &map_fd);
+
+    return r == 0;
+}
+
 void bf_ct_maps_free(struct bf_ct_maps **maps)
 {
     assert(maps);
