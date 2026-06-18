@@ -779,6 +779,29 @@ static int _bf_program_generate_elfstubs(struct bf_program *program)
             TAKE_PTR(fixup);
         }
 
+        /* The stub references host-global CT maps as relocatable globals: each
+         * is a BPF_LD_MAP_FD instruction copied verbatim above, with an
+         * unresolved (zero) immediate. Register a CT map fixup so the real
+         * pinned map fd is patched in, exactly like a normal map reference. */
+        bf_list_foreach (&elfstub->maps, map_node) {
+            _free_bf_fixup_ struct bf_fixup *fixup = NULL;
+            struct bf_elfstub_map *map = bf_list_node_get_data(map_node);
+            size_t insn_idx = start_at + map->insn_idx;
+            union bf_fixup_attr attr = {
+                .ct_map_id = (enum bf_ct_map_id)map->map_id,
+            };
+
+            r = bf_fixup_new(&fixup, BF_FIXUP_TYPE_CT_MAP_FD, insn_idx, &attr);
+            if (r)
+                return r;
+
+            r = bf_list_add_tail(&program->fixups, fixup);
+            if (r)
+                return r;
+
+            TAKE_PTR(fixup);
+        }
+
         program->elfstubs_location[fixup->attr.elfstub_id] = off;
     }
 

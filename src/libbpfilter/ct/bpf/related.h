@@ -19,12 +19,12 @@
 #include "cgen/runtime.h"
 #include "ct/bpf/helpers.h"
 #include "ct/bpf/key.h"
+#include "ct/bpf/maps.h"
 #include "ct/bpf/parse.h"
 #include "ct/bpf/stats.h"
 
 static __always_inline __u8
 bf_ct_bpf_lookup_related_v4(const struct bf_runtime *ctx,
-                            const struct bf_ct_bpf_maps *maps,
                             const struct icmphdr *icmp)
 {
     const struct iphdr *inner_ip;
@@ -69,19 +69,19 @@ bf_ct_bpf_lookup_related_v4(const struct bf_runtime *ctx,
     bf_ct_bpf_key_normalize_v4(inner_ip->saddr, inner_ip->daddr, sport, dport,
                                inner_ip->protocol, &inner_key, &orig_lo_is_src);
 
-    flow_map = (inner_key.proto == IPPROTO_TCP) ? maps->tcp : maps->any;
+    flow_map = (inner_key.proto == IPPROTO_TCP) ? (void *)&bf_ct_map_tcp :
+                                                  (void *)&bf_ct_map_any;
     entry = bpf_map_lookup_elem(flow_map, &inner_key);
     if (!entry)
         return CT_STATE_INVALID;
 
     entry->last_seen_ns = bpf_ktime_get_ns();
-    bf_ct_bpf_stats_related(maps->stats);
+    bf_ct_bpf_stats_related((void *)&bf_ct_map_stats);
     return CT_STATE_RELATED;
 }
 
 static __always_inline __u8
 bf_ct_bpf_lookup_related_v6(const struct bf_runtime *ctx,
-                            const struct bf_ct_bpf_maps *maps,
                             const struct icmp6hdr *icmp6)
 {
     const struct ipv6hdr *inner_ip;
@@ -119,26 +119,26 @@ bf_ct_bpf_lookup_related_v6(const struct bf_runtime *ctx,
                                dport, inner_ip->nexthdr, &inner_key,
                                &orig_lo_is_src);
 
-    flow_map = (inner_key.proto == IPPROTO_TCP) ? maps->tcp6 : maps->any6;
+    flow_map = (inner_key.proto == IPPROTO_TCP) ? (void *)&bf_ct_map_tcp6 :
+                                                  (void *)&bf_ct_map_any6;
     entry = bpf_map_lookup_elem(flow_map, &inner_key);
     if (!entry)
         return CT_STATE_INVALID;
 
     entry->last_seen_ns = bpf_ktime_get_ns();
-    bf_ct_bpf_stats_related(maps->stats);
+    bf_ct_bpf_stats_related((void *)&bf_ct_map_stats);
     return CT_STATE_RELATED;
 }
 
 static __always_inline __u8
 bf_ct_bpf_lookup_related(const struct bf_runtime *ctx,
-                         const struct bf_ct_bpf_maps *maps,
                          const struct bf_ct_pkt_info *pkt)
 {
 #ifdef BF_CT_BPF_HARNESS
     if (!pkt->is_v6 && pkt->proto == IPPROTO_ICMP && pkt->icmp)
-        return bf_ct_bpf_lookup_related_v4(ctx, maps, pkt->icmp);
+        return bf_ct_bpf_lookup_related_v4(ctx, pkt->icmp);
     if (pkt->is_v6 && pkt->proto == IPPROTO_ICMPV6 && pkt->icmp6)
-        return bf_ct_bpf_lookup_related_v6(ctx, maps, pkt->icmp6);
+        return bf_ct_bpf_lookup_related_v6(ctx, pkt->icmp6);
     return CT_STATE_INVALID;
 #else
     /* ICMP-error "related" tracking is disabled in the real datapath. It must
@@ -154,7 +154,6 @@ bf_ct_bpf_lookup_related(const struct bf_runtime *ctx,
      *       is available and the maps are not yet spilled), then read the
      *       inner packet from that buffer here. */
     (void)ctx;
-    (void)maps;
     (void)pkt;
     return CT_STATE_INVALID;
 #endif

@@ -57,38 +57,11 @@ struct
     __type(value, struct ct_test_ctrl);
 } ct_test_ctrl SEC(".maps");
 
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, CT_TEST_MAP_MAX);
-    __type(key, struct ct_key_v4);
-    __type(value, struct ct_entry);
-} ct_map_tcp SEC(".maps");
-
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, CT_TEST_MAP_MAX);
-    __type(key, struct ct_key_v6);
-    __type(value, struct ct_entry);
-} ct_map_tcp6 SEC(".maps");
-
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, CT_TEST_MAP_MAX);
-    __type(key, struct ct_key_v4);
-    __type(value, struct ct_entry);
-} ct_map_any SEC(".maps");
-
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, CT_TEST_MAP_MAX);
-    __type(key, struct ct_key_v6);
-    __type(value, struct ct_entry);
-} ct_map_any6 SEC(".maps");
-
+/* The flow tables, spi-reverse and stats maps are the host-global CT maps
+ * defined in ct/bpf/maps.h (bf_ct_map_*), included via lookup.h. The lookup
+ * path references them as relocatable globals; the create path reaches them
+ * through the bf_ct_bpf_maps struct built below. src_rate and src_count are
+ * create-only and defined locally to the harness. */
 struct
 {
     __uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
@@ -104,22 +77,6 @@ struct
     __type(key, struct ct_ip_key);
     __type(value, struct ct_src_count_entry);
 } ct_src_count SEC(".maps");
-
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, CT_TEST_MAP_MAX);
-    __type(key, struct ct_spi_reverse_key);
-    __type(value, __u32);
-} ct_spi_reverse SEC(".maps");
-
-struct
-{
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, struct ct_stats_counters);
-} ct_stats SEC(".maps");
 
 static __always_inline int
 _ct_harness_load_l4(struct __sk_buff *skb, struct bf_runtime *ctx, __u32 l4_off)
@@ -247,15 +204,18 @@ SEC("tc")
 int ct_harness(struct __sk_buff *skb)
 {
     struct ct_test_ctrl *ctrl;
+    /* The create path still reaches the maps through this struct; it points at
+     * the same host-global maps the lookup path references as relocatable
+     * globals (bf_ct_map_*), so both operate on one set of tables. */
     struct bf_ct_bpf_maps maps = {
-        .tcp = &ct_map_tcp,
-        .tcp6 = &ct_map_tcp6,
-        .any = &ct_map_any,
-        .any6 = &ct_map_any6,
+        .tcp = &bf_ct_map_tcp,
+        .tcp6 = &bf_ct_map_tcp6,
+        .any = &bf_ct_map_any,
+        .any6 = &bf_ct_map_any6,
         .src_rate = &ct_src_rate,
         .src_count = &ct_src_count,
-        .spi_reverse = &ct_spi_reverse,
-        .stats = &ct_stats,
+        .spi_reverse = &bf_ct_map_spi_reverse,
+        .stats = &bf_ct_map_stats,
     };
     struct ct_key_v4 key_v4 = {};
     struct ct_key_v6 key_v6 = {};
@@ -283,7 +243,7 @@ int ct_harness(struct __sk_buff *skb)
     if (_ct_harness_fill_runtime(skb, ctx))
         return TC_ACT_UNSPEC;
 
-    state = bf_ct_bpf_lookup(ctx, &maps, &key_v4, &key_v6, &is_reply);
+    state = bf_ct_bpf_lookup(ctx, &key_v4, &key_v6, &is_reply);
     is_v6 = key_v6.proto != 0;
 
     if (ctrl->op >= CT_TEST_OP_LOOKUP_UPDATE_TCP &&

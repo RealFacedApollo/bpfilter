@@ -14,23 +14,23 @@
 #include "cgen/runtime.h"
 #include "ct/bpf/ipsec.h"
 #include "ct/bpf/key.h"
+#include "ct/bpf/maps.h"
 #include "ct/bpf/parse.h"
 #include "ct/bpf/related.h"
 #include "ct/bpf/state.h"
 #include "ct/bpf/stats.h"
 
 static __always_inline struct ct_entry *
-bf_ct_bpf_lookup_entry_v4(const struct bf_ct_bpf_maps *maps,
-                          struct ct_key_v4 *key, __u8 proto, __u32 spi)
+bf_ct_bpf_lookup_entry_v4(struct ct_key_v4 *key, __u8 proto, __u32 spi)
 {
-    /* Look up with a local copy of the key. Passing the caller-frame key
-     * pointer (&ctx->ct_key_v4) to bpf_map_lookup_elem() makes the verifier
-     * scalarize the caller frame's spilled map pointers, breaking every
-     * subsequent map access in the subprogram. */
+    /* Look up with a local copy of the key. The flow and spi-reverse maps are
+     * referenced as relocatable globals (bf_ct_bpf_flow_map_global,
+     * &bf_ct_map_spi_reverse), so each map operand is a BPF_LD_MAP_FD constant
+     * the verifier always trusts — independent of the call frame. */
     struct ct_key_v4 local = *key;
     struct ct_spi_reverse_key rev_key = {};
     struct ct_entry *entry;
-    void *map = bf_ct_bpf_flow_map(maps, 0, proto);
+    void *map = bf_ct_bpf_flow_map_global(0, proto);
     __u32 *orig_spi;
 
     entry = bpf_map_lookup_elem(map, &local);
@@ -45,7 +45,7 @@ bf_ct_bpf_lookup_entry_v4(const struct bf_ct_bpf_maps *maps,
     rev_key.reply_spi = spi;
     rev_key.proto = proto;
 
-    orig_spi = bpf_map_lookup_elem(maps->spi_reverse, &rev_key);
+    orig_spi = bpf_map_lookup_elem((void *)&bf_ct_map_spi_reverse, &rev_key);
     if (!orig_spi)
         return NULL;
 
@@ -55,15 +55,14 @@ bf_ct_bpf_lookup_entry_v4(const struct bf_ct_bpf_maps *maps,
 }
 
 static __always_inline struct ct_entry *
-bf_ct_bpf_lookup_entry_v6(const struct bf_ct_bpf_maps *maps,
-                          struct ct_key_v6 *key, __u8 proto, __u32 spi)
+bf_ct_bpf_lookup_entry_v6(struct ct_key_v6 *key, __u8 proto, __u32 spi)
 {
-    /* See bf_ct_bpf_lookup_entry_v4(): look up with a local key copy so the
-     * caller-frame map pointers stay valid. */
+    /* See bf_ct_bpf_lookup_entry_v4(): maps are referenced as relocatable
+     * globals. */
     struct ct_key_v6 local = *key;
     struct ct_spi_reverse_key rev_key = {};
     struct ct_entry *entry;
-    void *map = bf_ct_bpf_flow_map(maps, 1, proto);
+    void *map = bf_ct_bpf_flow_map_global(1, proto);
     __u32 *orig_spi;
 
     entry = bpf_map_lookup_elem(map, &local);
@@ -78,7 +77,7 @@ bf_ct_bpf_lookup_entry_v6(const struct bf_ct_bpf_maps *maps,
     rev_key.reply_spi = spi;
     rev_key.proto = proto;
 
-    orig_spi = bpf_map_lookup_elem(maps->spi_reverse, &rev_key);
+    orig_spi = bpf_map_lookup_elem((void *)&bf_ct_map_spi_reverse, &rev_key);
     if (!orig_spi)
         return NULL;
 
@@ -121,7 +120,6 @@ bf_ct_bpf_lookup_hit(struct ct_entry *entry, __u8 is_reply, __u64 now_ns,
 }
 
 static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
-                                             struct bf_ct_bpf_maps *maps,
                                              struct ct_key_v4 *key_v4,
                                              struct ct_key_v6 *key_v6,
                                              __u8 *is_reply)
@@ -132,11 +130,11 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
     __u8 orig_lo_is_src = 0;
     __u8 state;
 
-    if (!ctx || !maps || bf_ct_bpf_parse_runtime(ctx, &pkt) < 0)
+    if (!ctx || bf_ct_bpf_parse_runtime(ctx, &pkt) < 0)
         return CT_STATE_INVALID;
 
     if (bf_ct_bpf_is_related_icmp_packet(&pkt))
-        return bf_ct_bpf_lookup_related(ctx, maps, &pkt);
+        return bf_ct_bpf_lookup_related(ctx, &pkt);
 
     now_ns = bpf_ktime_get_ns();
 
@@ -157,10 +155,10 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
         *is_reply = bf_ct_bpf_is_reply_v6(&pkt.src_v6, orig_lo_is_src,
                                           &key_v6->lo_ip, &key_v6->hi_ip);
 
-        entry = bf_ct_bpf_lookup_entry_v6(maps, key_v6, pkt.proto, pkt.spi);
+        entry = bf_ct_bpf_lookup_entry_v6(key_v6, pkt.proto, pkt.spi);
         if (!entry) {
             if (bf_ct_bpf_tcp_unsolicited_ack(&pkt)) {
-                bf_ct_bpf_stats_invalid(maps->stats);
+                bf_ct_bpf_stats_invalid((void *)&bf_ct_map_stats);
                 return CT_STATE_INVALID;
             }
             return CT_STATE_NEW;
@@ -178,7 +176,8 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
             __builtin_memcpy(&hi_ip, &key_v6->hi_ip.s6_addr[12],
                              sizeof(__be32));
             state = bf_ct_bpf_lookup_hit(entry, *is_reply, now_ns, ctx->pkt_size,
-                                         maps->stats, maps->spi_reverse, lo_ip,
+                                         (void *)&bf_ct_map_stats,
+                                         (void *)&bf_ct_map_spi_reverse, lo_ip,
                                          hi_ip, pkt.proto, pkt.spi);
         }
         key_v4->proto = 0;
@@ -201,10 +200,10 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
         *is_reply = bf_ct_bpf_is_reply_v4(pkt.src_v4, orig_lo_is_src,
                                           key_v4->lo_ip, key_v4->hi_ip);
 
-        entry = bf_ct_bpf_lookup_entry_v4(maps, key_v4, pkt.proto, pkt.spi);
+        entry = bf_ct_bpf_lookup_entry_v4(key_v4, pkt.proto, pkt.spi);
         if (!entry) {
             if (bf_ct_bpf_tcp_unsolicited_ack(&pkt)) {
-                bf_ct_bpf_stats_invalid(maps->stats);
+                bf_ct_bpf_stats_invalid((void *)&bf_ct_map_stats);
                 return CT_STATE_INVALID;
             }
             return CT_STATE_NEW;
@@ -213,7 +212,8 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
         *is_reply = bf_ct_bpf_is_reply_v4(pkt.src_v4, entry->orig_lo_is_src,
                                           key_v4->lo_ip, key_v4->hi_ip);
         state = bf_ct_bpf_lookup_hit(entry, *is_reply, now_ns, ctx->pkt_size,
-                                     maps->stats, maps->spi_reverse,
+                                     (void *)&bf_ct_map_stats,
+                                     (void *)&bf_ct_map_spi_reverse,
                                      key_v4->lo_ip, key_v4->hi_ip, pkt.proto,
                                      pkt.spi);
         key_v6->proto = 0;

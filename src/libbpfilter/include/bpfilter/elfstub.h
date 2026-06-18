@@ -55,9 +55,10 @@
  *
  * Not any BPF program can be integrated into a bpfilter program, this section
  * lists the current set of limitations:
- * - Maps are not supported: BPF maps can be defined, but they are not
- *   integrated by bpfilter into the program, so the final BPF program won't
- *   be verifiable.
+ * - Maps: only the host-global conntrack maps are supported. They are
+ *   referenced as relocatable globals (see ct/bpf/maps.h) and patched to the
+ *   real pinned map fd at integration time (@ref bf_ct_map_id_from_sym). Any
+ *   other map defined in a stub is not integrated and won't be verifiable.
  * - Function are not supported: each ELF stub source code should contain a
  *   single function to be integrated. Inline functions are allowed, as they're
  *   not real functions in the final ELF file.
@@ -215,6 +216,24 @@ struct bf_printk_str
 };
 
 /**
+ * @brief A CT map reference found in an ELF stub.
+ *
+ * The conntrack stubs reference the host-global CT maps as relocatable globals.
+ * Each such reference is a @c BPF_LD_MAP_FD instruction with an unresolved
+ * immediate; the elfstub relocation pass records its location and the map it
+ * refers to so the real pinned map fd can be patched in when the stub is
+ * integrated into a program.
+ */
+struct bf_elfstub_map
+{
+    /** Index of the @c BPF_LD_MAP_FD instruction within the stub's @c insns. */
+    size_t insn_idx;
+
+    /** Identifier of the referenced CT map (@ref bf_ct_map_id). */
+    int map_id;
+};
+
+/**
  * @brief Processed ELF stub to be integrated into a BPF program.
  */
 struct bf_elfstub
@@ -223,6 +242,7 @@ struct bf_elfstub
     struct bpf_insn *insns;
     size_t ninsns;
     bf_list strs;
+    bf_list maps;
 };
 
 #define _free_bf_elfstub_ __attribute__((__cleanup__(bf_elfstub_free)))

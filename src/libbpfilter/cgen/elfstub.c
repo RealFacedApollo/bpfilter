@@ -9,6 +9,7 @@
 #include <errno.h>
 
 #include <bpfilter/btf.h>
+#include <bpfilter/ct.h>
 #include <bpfilter/elfstub.h>
 #include <bpfilter/helper.h>
 #include <bpfilter/logger.h>
@@ -41,6 +42,31 @@ static void _bf_printk_str_free(struct bf_printk_str **pstr)
         return;
 
     BF_FREEP(pstr);
+}
+
+#define _free_bf_elfstub_map_ __attribute__((cleanup(_bf_elfstub_map_free)))
+
+static int _bf_elfstub_map_new(struct bf_elfstub_map **map, size_t insn_idx,
+                               int map_id)
+{
+    assert(map);
+
+    *map = malloc(sizeof(struct bf_elfstub_map));
+    if (!*map)
+        return -ENOMEM;
+
+    (*map)->insn_idx = insn_idx;
+    (*map)->map_id = map_id;
+
+    return 0;
+}
+
+static void _bf_elfstub_map_free(struct bf_elfstub_map **map)
+{
+    if (!*map)
+        return;
+
+    BF_FREEP(map);
 }
 
 static int _bf_elfstub_prepare(struct bf_elfstub *stub,
@@ -160,22 +186,57 @@ static int _bf_elfstub_prepare(struct bf_elfstub *stub,
                     bf_dbg("updated stub to call '%s' from instruction %lu",
                            name, idx);
                 }
-            } else if (type == R_BPF_64_64 && rodata_shdr) {
-                _free_bf_printk_str_ struct bf_printk_str *pstr = NULL;
+            } else if (type == R_BPF_64_64 && sym_idx < sym_count) {
+                /* A 64-bit relocation against .text is either a reference to a
+                 * host-global CT map (the symbol lives in the .maps section)
+                 * or a bpf_printk() format string (the symbol lives in
+                 * .rodata). Discriminate on the symbol's section. */
+                const Elf64_Sym *sym = &symbols[sym_idx];
+                const char *sym_sec =
+                    (sym->st_shndx < ehdr->e_shnum) ?
+                        &strtab[shdrs[sym->st_shndx].sh_name] :
+                        "";
                 size_t insn_idx = rels[j].r_offset / 8;
-                size_t str_offset = stub->insns[insn_idx].imm;
-                const char *str =
-                    raw->elf + rodata_shdr->sh_offset + str_offset;
 
-                r = _bf_printk_str_new(&pstr, insn_idx, str);
-                if (r)
-                    return bf_err_r(r, "failed to create printk_str");
+                if (bf_streq(sym_sec, ".maps")) {
+                    _free_bf_elfstub_map_ struct bf_elfstub_map *map = NULL;
+                    const char *map_name = &sym_strtab[sym->st_name];
+                    int map_id = bf_ct_map_id_from_sym(map_name);
 
-                r = bf_list_add_tail(&stub->strs, pstr);
-                if (r)
-                    return bf_err_r(r, "failed to add printk_str to elfstub");
+                    if (map_id < 0) {
+                        return bf_err_r(map_id,
+                                        "unknown CT map symbol '%s' in elfstub",
+                                        map_name);
+                    }
 
-                TAKE_PTR(pstr);
+                    r = _bf_elfstub_map_new(&map, insn_idx, map_id);
+                    if (r)
+                        return bf_err_r(r, "failed to create elfstub map ref");
+
+                    r = bf_list_add_tail(&stub->maps, map);
+                    if (r)
+                        return bf_err_r(r, "failed to add map ref to elfstub");
+
+                    bf_dbg("stub references CT map '%s' from instruction %zu",
+                           map_name, insn_idx);
+
+                    TAKE_PTR(map);
+                } else if (rodata_shdr) {
+                    _free_bf_printk_str_ struct bf_printk_str *pstr = NULL;
+                    size_t str_offset = stub->insns[insn_idx].imm;
+                    const char *str =
+                        raw->elf + rodata_shdr->sh_offset + str_offset;
+
+                    r = _bf_printk_str_new(&pstr, insn_idx, str);
+                    if (r)
+                        return bf_err_r(r, "failed to create printk_str");
+
+                    r = bf_list_add_tail(&stub->strs, pstr);
+                    if (r)
+                        return bf_err_r(r, "failed to add printk_str to elfstub");
+
+                    TAKE_PTR(pstr);
+                }
             }
         }
     }
@@ -195,6 +256,7 @@ int bf_elfstub_new(struct bf_elfstub **stub, enum bf_elfstub_id id)
         return -ENOMEM;
 
     _stub->strs = bf_list_default(_bf_printk_str_free, NULL);
+    _stub->maps = bf_list_default(_bf_elfstub_map_free, NULL);
 
     r = _bf_elfstub_prepare(_stub, &_bf_rawstubs[id]);
     if (r)
@@ -213,6 +275,7 @@ void bf_elfstub_free(struct bf_elfstub **stub)
         return;
 
     bf_list_clean(&(*stub)->strs);
+    bf_list_clean(&(*stub)->maps);
     BF_FREEP(&(*stub)->insns);
     BF_FREEP(stub);
 }

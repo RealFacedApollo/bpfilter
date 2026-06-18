@@ -581,6 +581,33 @@ int bf_ct_maps_get_fd(const struct bf_ct_maps *maps, enum bf_ct_map_id id)
     return maps->maps[id].fd;
 }
 
+int bf_ct_map_id_from_sym(const char *name)
+{
+    static const struct
+    {
+        const char *name;
+        enum bf_ct_map_id id;
+    } syms[] = {
+        {"bf_ct_map_tcp", BF_CT_MAP_TCP},
+        {"bf_ct_map_tcp6", BF_CT_MAP_TCP6},
+        {"bf_ct_map_any", BF_CT_MAP_ANY},
+        {"bf_ct_map_any6", BF_CT_MAP_ANY6},
+        {"bf_ct_map_src_rate", BF_CT_MAP_SRC_RATE},
+        {"bf_ct_map_src_count", BF_CT_MAP_SRC_COUNT},
+        {"bf_ct_map_spi_reverse", BF_CT_MAP_SPI_REVERSE},
+        {"bf_ct_map_stats", BF_CT_MAP_STATS},
+    };
+
+    assert(name);
+
+    for (size_t i = 0; i < ARRAY_SIZE(syms); i++) {
+        if (bf_streq(name, syms[i].name))
+            return syms[i].id;
+    }
+
+    return -ENOENT;
+}
+
 int bf_ct_maps_init_timeouts(struct bf_ct_maps *maps)
 {
     struct ct_timeouts timeouts;

@@ -12,25 +12,11 @@
 
 __u8 bf_ct_lookup(struct bf_runtime *ctx, struct bf_ct_lookup_args *args)
 {
-    /* Copy the maps into this frame and operate on the local copy. The map
-     * pointers are spilled in the caller frame; any helper call that receives
-     * a caller-frame pointer (a flow key, the dynptr, ...) makes the verifier
-     * scalarize those spills, so a later map access would see a non-map.
-     * Taking the address of a local copy forces it into this frame, whose
-     * spills survive such helper calls. */
-    struct bf_ct_bpf_maps maps;
-
-    /* Field-by-field so each map pointer is a typed copy the verifier tracks;
-     * a struct assignment lowers to a byte memcpy that drops the map type. */
-    maps.tcp = ctx->ct_maps.tcp;
-    maps.tcp6 = ctx->ct_maps.tcp6;
-    maps.any = ctx->ct_maps.any;
-    maps.any6 = ctx->ct_maps.any6;
-    maps.src_rate = ctx->ct_maps.src_rate;
-    maps.src_count = ctx->ct_maps.src_count;
-    maps.spi_reverse = ctx->ct_maps.spi_reverse;
-    maps.stats = ctx->ct_maps.stats;
-
-    return bf_ct_bpf_lookup(ctx, &maps, args->key_v4, args->key_v6,
-                            args->is_reply);
+    /* The CT maps are referenced as host-global relocatable maps (see
+     * ct/bpf/maps.h): each bpf_map_lookup_elem() operand is a BPF_LD_MAP_FD
+     * constant the elfstub loader patches with the real pinned map fd. No map
+     * pointer is carried through the runtime struct or this frame's stack, so
+     * the verifier keeps the map type across the subprogram's helper calls.
+     * args->maps is unused (the create stub still uses the struct path). */
+    return bf_ct_bpf_lookup(ctx, args->key_v4, args->key_v6, args->is_reply);
 }

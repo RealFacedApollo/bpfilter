@@ -543,6 +543,21 @@ int bf_ct_maps_pin(const struct bf_ct_maps *maps, int pindir_fd);
 int bf_ct_maps_get_fd(const struct bf_ct_maps *maps, enum bf_ct_map_id id);
 
 /**
+ * @brief Resolve a CT map ELF symbol name to its @ref bf_ct_map_id.
+ *
+ * The conntrack BPF stubs reference the host-global CT maps as relocatable
+ * globals (e.g. @c bf_ct_map_tcp). When an ELF stub is loaded, the elfstub
+ * relocation pass uses this mapping to turn each map symbol into a
+ * @c BF_FIXUP_TYPE_CT_MAP_FD fixup, so the real pinned map fd is patched into
+ * the @c BPF_LD_MAP_FD instruction.
+ *
+ * @param name Symbol name of the map, as found in the stub's symbol table.
+ * @return The matching @ref bf_ct_map_id (>= 0), or @c -ENOENT if @p name is
+ *         not a known CT map symbol.
+ */
+int bf_ct_map_id_from_sym(const char *name);
+
+/**
  * @brief Write default timeout values into the @c ct_timeouts map.
  */
 int bf_ct_maps_init_timeouts(struct bf_ct_maps *maps);
