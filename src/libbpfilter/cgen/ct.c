@@ -168,7 +168,10 @@ static int _bf_ct_emit_lookup_call(struct bf_program *program)
                              _BF_CT_RUNTIME_OFF(ct_key_v4.hi_ip), 0));
     EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10,
                              _BF_CT_RUNTIME_OFF(ct_key_v4.discriminator), 0));
-    EMIT(program, BPF_ST_MEM(BPF_B, BPF_REG_10, _BF_CT_RUNTIME_OFF(ct_key_v4.proto),
+    /* Word store covers proto and the 3 padding bytes: the whole key must be
+     * initialized before it is used as a map lookup key, or the verifier
+     * rejects the program with "invalid indirect read from stack". */
+    EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10, _BF_CT_RUNTIME_OFF(ct_key_v4.proto),
                              0));
 
     EMIT(program, BPF_ST_MEM(BPF_DW, BPF_REG_10,
@@ -181,7 +184,8 @@ static int _bf_ct_emit_lookup_call(struct bf_program *program)
                              _BF_CT_RUNTIME_OFF(ct_key_v6.hi_ip) + 8, 0));
     EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10,
                              _BF_CT_RUNTIME_OFF(ct_key_v6.discriminator), 0));
-    EMIT(program, BPF_ST_MEM(BPF_B, BPF_REG_10, _BF_CT_RUNTIME_OFF(ct_key_v6.proto),
+    /* Word store covers proto and the 3 padding bytes (see ct_key_v4 above). */
+    EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10, _BF_CT_RUNTIME_OFF(ct_key_v6.proto),
                              0));
 
     EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10, BF_PROG_SCR_OFF(0), 0));
@@ -240,6 +244,11 @@ static int _bf_ct_emit_copy_key_v4(struct bf_program *program, int src_reg)
                                             key_v4.discriminator)));
     EMIT(program, BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_1,
                               _BF_CT_RUNTIME_OFF(ct_key_v4.discriminator)));
+    /* Zero proto and the 3 padding bytes first, then overwrite the proto byte:
+     * the copy only fills the named fields, so the pad would otherwise stay
+     * uninitialized and fail verification when the key is looked up. */
+    EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10, _BF_CT_RUNTIME_OFF(ct_key_v4.proto),
+                             0));
     EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_1, src_reg,
                               (int)offsetof(struct ct_tail_scratch, key_v4.proto)));
     EMIT(program, BPF_STX_MEM(BPF_B, BPF_REG_10, BPF_REG_1,

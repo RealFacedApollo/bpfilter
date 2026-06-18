@@ -1050,18 +1050,21 @@ static int _bf_program_fixup_ct_maps(struct bf_program *program)
 static int _bf_program_bpf_load(struct bf_program *prog, int *out_fd)
 {
     _cleanup_free_ char *log_buf = NULL;
+    bool want_log = bf_ctx_is_verbose(BF_VERBOSE_DEBUG);
     int r;
 
-    if (bf_ctx_is_verbose(BF_VERBOSE_DEBUG)) {
+    if (bf_ctx_is_verbose(BF_VERBOSE_BYTECODE))
+        bf_program_dump_bytecode(prog);
+
+load:
+    if (want_log && !log_buf) {
         log_buf = malloc(_BF_LOG_BUF_SIZE);
         if (!log_buf) {
             return bf_err_r(-ENOMEM,
                             "failed to allocate BPF_PROG_LOAD logs buffer");
         }
+        log_buf[0] = '\0';
     }
-
-    if (bf_ctx_is_verbose(BF_VERBOSE_BYTECODE))
-        bf_program_dump_bytecode(prog);
 
     r = bf_bpf_prog_load(prog->handle->prog_name,
                          bf_hook_to_bpf_prog_type(prog->runtime.chain->hook),
@@ -1070,6 +1073,14 @@ static int _bf_program_bpf_load(struct bf_program *prog, int *out_fd)
                          log_buf, log_buf ? _BF_LOG_BUF_SIZE : 0,
                          bf_ctx_token(), out_fd);
     if (r) {
+        /* The verifier log is only worth its allocation cost when a load
+         * fails. If the first attempt failed without a log buffer (debug
+         * verbosity disabled), retry once with one so the rejection reason
+         * is captured instead of being lost as "<NO LOG BUFFER>". */
+        if (!want_log) {
+            want_log = true;
+            goto load;
+        }
         return bf_err_r(r, "failed to load bf_program (%lu insns):\n%s\nerrno:",
                         prog->img.size, log_buf ? log_buf : "<NO LOG BUFFER>");
     }

@@ -100,10 +100,16 @@ static int _bf_ct_btf_load(struct bf_btf *btf)
 }
 
 static struct bf_btf *_bf_ct_make_flow_btf(const char *key_name, size_t key_size,
-                                           size_t value_size)
+                                           size_t value_size, bool is_v6)
 {
     _free_bf_btf_ struct bf_btf *btf = NULL;
     struct btf *kbtf;
+    int u8_id, u32_id, ip_id;
+    /* Bit offsets of the key fields, matching struct ct_key_v4/v6. The IPv6
+     * addresses are 16 bytes each, shifting the trailing fields. */
+    int hi_off = is_v6 ? 128 : 32;
+    int disc_off = is_v6 ? 256 : 64;
+    int proto_off = is_v6 ? 288 : 96;
     int r;
 
     r = _bf_ct_btf_new(&btf);
@@ -112,12 +118,16 @@ static struct bf_btf *_bf_ct_make_flow_btf(const char *key_name, size_t key_size
 
     kbtf = btf->btf;
 
-    btf__add_int(kbtf, "u64", 8, 0);
+    u8_id = btf__add_int(kbtf, "u8", 1, 0);
+    u32_id = btf__add_int(kbtf, "u32", 4, 0);
+    /* lo_ip/hi_ip are __be32 for IPv4 and 16-byte addresses for IPv6. */
+    ip_id = is_v6 ? btf__add_array(kbtf, u32_id, u8_id, 16) : u32_id;
+
     btf->key_type_id = btf__add_struct(kbtf, key_name, key_size);
-    btf__add_field(kbtf, "lo_ip", 1, 0, 0);
-    btf__add_field(kbtf, "hi_ip", 1, 32, 0);
-    btf__add_field(kbtf, "discriminator", 1, 64, 0);
-    btf__add_field(kbtf, "proto", 1, 96, 0);
+    btf__add_field(kbtf, "lo_ip", ip_id, 0, 0);
+    btf__add_field(kbtf, "hi_ip", ip_id, hi_off, 0);
+    btf__add_field(kbtf, "discriminator", u32_id, disc_off, 0);
+    btf__add_field(kbtf, "proto", u8_id, proto_off, 0);
     btf->value_type_id = btf__add_struct(kbtf, "ct_entry", value_size);
 
     r = _bf_ct_btf_load(btf);
@@ -142,9 +152,10 @@ static struct bf_btf *_bf_ct_make_ip_key_btf(const char *value_name,
 
     kbtf = btf->btf;
 
-    btf__add_int(kbtf, "u64", 8, 0);
+    int u8_id = btf__add_int(kbtf, "u8", 1, 0);
+    int addr_id = btf__add_array(kbtf, btf__add_int(kbtf, "u32", 4, 0), u8_id, 16);
     btf->key_type_id = btf__add_struct(kbtf, "ct_ip_key", sizeof(struct ct_ip_key));
-    btf__add_field(kbtf, "addr", 1, 0, 0);
+    btf__add_field(kbtf, "addr", addr_id, 0, 0);
     btf->value_type_id = btf__add_struct(kbtf, value_name, value_size);
 
     r = _bf_ct_btf_load(btf);
@@ -194,15 +205,16 @@ static struct bf_btf *_bf_ct_make_spi_reverse_btf(void)
 
     kbtf = btf->btf;
 
-    btf__add_int(kbtf, "u64", 8, 0);
+    int u8_id = btf__add_int(kbtf, "u8", 1, 0);
+    int u32_id = btf__add_int(kbtf, "u32", 4, 0);
     btf->key_type_id =
         btf__add_struct(kbtf, "ct_spi_reverse_key",
                         sizeof(struct ct_spi_reverse_key));
-    btf__add_field(kbtf, "lo_ip", 1, 0, 0);
-    btf__add_field(kbtf, "hi_ip", 1, 32, 0);
-    btf__add_field(kbtf, "reply_spi", 1, 64, 0);
-    btf__add_field(kbtf, "proto", 1, 96, 0);
-    btf->value_type_id = btf__add_int(kbtf, "u32", 4, 0);
+    btf__add_field(kbtf, "lo_ip", u32_id, 0, 0);
+    btf__add_field(kbtf, "hi_ip", u32_id, 32, 0);
+    btf__add_field(kbtf, "reply_spi", u32_id, 64, 0);
+    btf__add_field(kbtf, "proto", u8_id, 96, 0);
+    btf->value_type_id = u32_id;
 
     r = _bf_ct_btf_load(btf);
     if (r) {
@@ -234,19 +246,19 @@ static int _bf_ct_map_create(struct bf_ct_map *map, int ct_dir_fd, bool *created
     switch (map->id) {
     case BF_CT_MAP_TCP:
         btf = _bf_ct_make_flow_btf("ct_key_v4", sizeof(struct ct_key_v4),
-                                   sizeof(struct ct_entry));
+                                   sizeof(struct ct_entry), false);
         break;
     case BF_CT_MAP_TCP6:
         btf = _bf_ct_make_flow_btf("ct_key_v6", sizeof(struct ct_key_v6),
-                                   sizeof(struct ct_entry));
+                                   sizeof(struct ct_entry), true);
         break;
     case BF_CT_MAP_ANY:
         btf = _bf_ct_make_flow_btf("ct_key_v4", sizeof(struct ct_key_v4),
-                                   sizeof(struct ct_entry));
+                                   sizeof(struct ct_entry), false);
         break;
     case BF_CT_MAP_ANY6:
         btf = _bf_ct_make_flow_btf("ct_key_v6", sizeof(struct ct_key_v6),
-                                   sizeof(struct ct_entry));
+                                   sizeof(struct ct_entry), true);
         break;
     case BF_CT_MAP_SRC_RATE:
         btf = _bf_ct_make_ip_key_btf("ct_rate_entry", sizeof(struct ct_rate_entry));
