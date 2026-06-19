@@ -63,6 +63,11 @@ function(bf_target_add_elfstubs TARGET)
                     -I ${CMAKE_SOURCE_DIR}/src/libbpfilter/include
                     -I ${CMAKE_SOURCE_DIR}/src/libbpfilter
                     -I ${CMAKE_SOURCE_DIR}/src/external/include
+                    # Emit a depfile so every transitively included header (the
+                    # ct/bpf/*.h stubs carry most of the logic) marks the stub
+                    # out of date. Hand-maintaining the header list silently
+                    # drifts and leaves stale stubs embedded in the library.
+                    -MMD -MF ${ELFSTUBS_ELF_DIR}/${_stub}.o.d
                     -c ${_LOCAL_DIR}/${_stub}.bpf.c
                     -o ${ELFSTUBS_ELF_DIR}/${_stub}.o
             COMMAND
@@ -85,8 +90,8 @@ function(bf_target_add_elfstubs TARGET)
             DEPENDS
                 ${_LOCAL_DIR}/${_stub}.bpf.c
                 ${DECL_TEMPLATE_PATH}
-                ${CMAKE_SOURCE_DIR}/src/libbpfilter/include/bpfilter/runtime.h
-                ${CMAKE_SOURCE_DIR}/src/libbpfilter/cgen/runtime.h
+            DEPFILE
+                ${ELFSTUBS_ELF_DIR}/${_stub}.o.d
             OUTPUT
                 ${ELFSTUBS_INC_DIR}/${_stub}.inc.c
             COMMENT "Generate ${_stub} stub"
