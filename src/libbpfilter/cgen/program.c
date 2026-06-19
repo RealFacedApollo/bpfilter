@@ -474,6 +474,13 @@ static int _bf_program_fixup(struct bf_program *program,
             value = bf_ct_maps_get_fd(ct_maps, fixup->attr.ct_map_id);
             if (value < 0)
                 return value;
+            /* A CT map reference inside an elfstub is a relocation against a
+             * map global, which clang emits as a plain BPF_LD_IMM64 (src_reg
+             * 0). Patching the imm alone leaves the verifier seeing a scalar;
+             * promote it to a real map-fd load so it becomes CONST_PTR_TO_MAP.
+             * cgen-emitted references already use BPF_LD_MAP_FD, so this is a
+             * no-op for them. */
+            insn->src_reg = BPF_PSEUDO_MAP_FD;
             break;
         }
         case BF_FIXUP_TYPE_PROG_ARRAY_FD:
