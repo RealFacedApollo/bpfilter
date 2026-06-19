@@ -13,6 +13,7 @@
 #include "cgen/runtime.h"
 #include "ct/bpf/helpers.h"
 #include "ct/bpf/key.h"
+#include "ct/bpf/maps.h"
 #include "ct/bpf/parse.h"
 #include "ct/bpf/rate.h"
 #include "ct/bpf/state.h"
@@ -35,7 +36,7 @@ bf_ct_bpf_initial_sctp_state(const struct bf_ct_pkt_info *pkt)
 }
 
 static __always_inline __u8
-bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
+bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx,
                           const struct bf_ct_pkt_info *pkt,
                           struct ct_key_v4 *key, __u8 orig_lo_is_src)
 {
@@ -48,13 +49,15 @@ bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
     now_ns = bpf_ktime_get_ns();
     bf_ct_bpf_ip_key_from_v4(pkt->src_v4, &ip_key);
 
-    if (bf_ct_bpf_rate_check(maps->src_rate, &ip_key, pkt->proto, now_ns)) {
-        bf_ct_bpf_stats_rate_drop(maps->stats);
+    if (bf_ct_bpf_rate_check((void *)&bf_ct_map_src_rate, &ip_key, pkt->proto,
+                             now_ns)) {
+        bf_ct_bpf_stats_rate_drop((void *)&bf_ct_map_stats);
         return 0;
     }
 
-    if (bf_ct_bpf_src_count_check(maps->src_count, &ip_key, pkt->proto)) {
-        bf_ct_bpf_stats_count_drop(maps->stats);
+    if (bf_ct_bpf_src_count_check((void *)&bf_ct_map_src_count, &ip_key,
+                                  pkt->proto)) {
+        bf_ct_bpf_stats_count_drop((void *)&bf_ct_map_stats);
         return 0;
     }
 
@@ -73,11 +76,11 @@ bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
     else if (pkt->proto == IPPROTO_SCTP)
         entry.internal_state = bf_ct_bpf_initial_sctp_state(pkt);
 
-    flow_map = bf_ct_bpf_flow_map(maps, 0, pkt->proto);
+    flow_map = bf_ct_bpf_flow_map_global(0, pkt->proto);
     {
-        /* Insert with a local key copy: passing the caller-frame key pointer
-         * to bpf_map_update_elem() scalarizes the caller's spilled map
-         * pointers, breaking the map accesses below. */
+        /* Insert with a local key copy so the map operand stays a constant
+         * map pointer (the relocatable global), independent of the call
+         * frame's spilled stack contents. */
         struct ct_key_v4 local = *key;
 
         r = bpf_map_update_elem(flow_map, &local, &entry, BPF_NOEXIST);
@@ -85,13 +88,13 @@ bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
     if (r)
         return 0;
 
-    bf_ct_bpf_src_count_inc(maps->src_count, &ip_key);
-    bf_ct_bpf_stats_new(maps->stats, pkt->proto);
+    bf_ct_bpf_src_count_inc((void *)&bf_ct_map_src_count, &ip_key);
+    bf_ct_bpf_stats_new((void *)&bf_ct_map_stats, pkt->proto);
     return 1;
 }
 
 static __always_inline __u8
-bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
+bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx,
                           const struct bf_ct_pkt_info *pkt,
                           struct ct_key_v6 *key, __u8 orig_lo_is_src)
 {
@@ -104,13 +107,15 @@ bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
     now_ns = bpf_ktime_get_ns();
     bf_ct_bpf_ip_key_from_v6(&pkt->src_v6, &ip_key);
 
-    if (bf_ct_bpf_rate_check(maps->src_rate, &ip_key, pkt->proto, now_ns)) {
-        bf_ct_bpf_stats_rate_drop(maps->stats);
+    if (bf_ct_bpf_rate_check((void *)&bf_ct_map_src_rate, &ip_key, pkt->proto,
+                             now_ns)) {
+        bf_ct_bpf_stats_rate_drop((void *)&bf_ct_map_stats);
         return 0;
     }
 
-    if (bf_ct_bpf_src_count_check(maps->src_count, &ip_key, pkt->proto)) {
-        bf_ct_bpf_stats_count_drop(maps->stats);
+    if (bf_ct_bpf_src_count_check((void *)&bf_ct_map_src_count, &ip_key,
+                                  pkt->proto)) {
+        bf_ct_bpf_stats_count_drop((void *)&bf_ct_map_stats);
         return 0;
     }
 
@@ -129,7 +134,7 @@ bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
     else if (pkt->proto == IPPROTO_SCTP)
         entry.internal_state = bf_ct_bpf_initial_sctp_state(pkt);
 
-    flow_map = bf_ct_bpf_flow_map(maps, 1, pkt->proto);
+    flow_map = bf_ct_bpf_flow_map_global(1, pkt->proto);
     {
         /* See bf_ct_bpf_create_entry_v4(): insert with a local key copy. */
         struct ct_key_v6 local = *key;
@@ -139,20 +144,19 @@ bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
     if (r)
         return 0;
 
-    bf_ct_bpf_src_count_inc(maps->src_count, &ip_key);
-    bf_ct_bpf_stats_new(maps->stats, pkt->proto);
+    bf_ct_bpf_src_count_inc((void *)&bf_ct_map_src_count, &ip_key);
+    bf_ct_bpf_stats_new((void *)&bf_ct_map_stats, pkt->proto);
     return 1;
 }
 
 static __always_inline __u8
-bf_ct_bpf_create_if_new(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
-                        __u8 ct_state, __u8 is_v6, struct ct_key_v4 *key_v4,
-                        struct ct_key_v6 *key_v6)
+bf_ct_bpf_create_if_new(struct bf_runtime *ctx, __u8 ct_state, __u8 is_v6,
+                        struct ct_key_v4 *key_v4, struct ct_key_v6 *key_v6)
 {
     struct bf_ct_pkt_info pkt = {};
     __u8 orig_lo_is_src = 0;
 
-    if (ct_state != CT_STATE_NEW || !ctx || !maps)
+    if (ct_state != CT_STATE_NEW || !ctx)
         return 0;
 
     if (bf_ct_bpf_parse_runtime(ctx, &pkt) < 0)
@@ -172,8 +176,7 @@ bf_ct_bpf_create_if_new(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
         bf_ct_bpf_key_normalize_v6(&pkt.src_v6, &pkt.dst_v6, src_disc,
                                    dst_disc, pkt.proto, key_v6,
                                    &orig_lo_is_src);
-        return bf_ct_bpf_create_entry_v6(ctx, maps, &pkt, key_v6,
-                                           orig_lo_is_src);
+        return bf_ct_bpf_create_entry_v6(ctx, &pkt, key_v6, orig_lo_is_src);
     }
 
     {
@@ -189,7 +192,6 @@ bf_ct_bpf_create_if_new(struct bf_runtime *ctx, struct bf_ct_bpf_maps *maps,
 
         bf_ct_bpf_key_normalize_v4(pkt.src_v4, pkt.dst_v4, src_disc, dst_disc,
                                    pkt.proto, key_v4, &orig_lo_is_src);
-        return bf_ct_bpf_create_entry_v4(ctx, maps, &pkt, key_v4,
-                                          orig_lo_is_src);
+        return bf_ct_bpf_create_entry_v4(ctx, &pkt, key_v4, orig_lo_is_src);
     }
 }

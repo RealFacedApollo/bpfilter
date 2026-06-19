@@ -57,26 +57,10 @@ struct
     __type(value, struct ct_test_ctrl);
 } ct_test_ctrl SEC(".maps");
 
-/* The flow tables, spi-reverse and stats maps are the host-global CT maps
- * defined in ct/bpf/maps.h (bf_ct_map_*), included via lookup.h. The lookup
- * path references them as relocatable globals; the create path reaches them
- * through the bf_ct_bpf_maps struct built below. src_rate and src_count are
- * create-only and defined locally to the harness. */
-struct
-{
-    __uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
-    __uint(max_entries, CT_TEST_MAP_MAX);
-    __type(key, struct ct_ip_key);
-    __type(value, struct ct_rate_entry);
-} ct_src_rate SEC(".maps");
-
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, CT_TEST_MAP_MAX);
-    __type(key, struct ct_ip_key);
-    __type(value, struct ct_src_count_entry);
-} ct_src_count SEC(".maps");
+/* All CT maps (flow tables, src-rate, src-count, spi-reverse, stats) are the
+ * host-global CT maps defined in ct/bpf/maps.h (bf_ct_map_*), included via
+ * lookup.h. Both the lookup and create paths reference them as relocatable
+ * globals, so they operate on one set of tables. */
 
 static __always_inline int
 _ct_harness_load_l4(struct __sk_buff *skb, struct bf_runtime *ctx, __u32 l4_off)
@@ -204,19 +188,6 @@ SEC("tc")
 int ct_harness(struct __sk_buff *skb)
 {
     struct ct_test_ctrl *ctrl;
-    /* The create path still reaches the maps through this struct; it points at
-     * the same host-global maps the lookup path references as relocatable
-     * globals (bf_ct_map_*), so both operate on one set of tables. */
-    struct bf_ct_bpf_maps maps = {
-        .tcp = &bf_ct_map_tcp,
-        .tcp6 = &bf_ct_map_tcp6,
-        .any = &bf_ct_map_any,
-        .any6 = &bf_ct_map_any6,
-        .src_rate = &ct_src_rate,
-        .src_count = &ct_src_count,
-        .spi_reverse = &bf_ct_map_spi_reverse,
-        .stats = &bf_ct_map_stats,
-    };
     struct ct_key_v4 key_v4 = {};
     struct ct_key_v6 key_v6 = {};
     struct ct_entry *entry;
@@ -248,7 +219,7 @@ int ct_harness(struct __sk_buff *skb)
 
     if (ctrl->op >= CT_TEST_OP_LOOKUP_UPDATE_TCP &&
         bf_ct_bpf_parse_runtime(ctx, &pkt) == 0) {
-        flow_map = bf_ct_bpf_flow_map(&maps, is_v6, pkt.proto);
+        flow_map = bf_ct_bpf_flow_map_global(is_v6, pkt.proto);
         entry = is_v6 ? bpf_map_lookup_elem(flow_map, &key_v6)
                       : bpf_map_lookup_elem(flow_map, &key_v4);
         if (entry) {
@@ -261,7 +232,7 @@ int ct_harness(struct __sk_buff *skb)
     }
 
     if (ctrl->op >= CT_TEST_OP_LOOKUP_CREATE)
-        bf_ct_bpf_create_if_new(ctx, &maps, state, is_v6, &key_v4, &key_v6);
+        bf_ct_bpf_create_if_new(ctx, state, is_v6, &key_v4, &key_v6);
 
     return state;
 }

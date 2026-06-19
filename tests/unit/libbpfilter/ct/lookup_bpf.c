@@ -140,14 +140,14 @@ static int _bft_ct_harness_open(struct bft_ct_harness *h)
         return -EBADF;
 
     h->ctrl_fd = _bft_ct_map_fd(h->obj, "ct_test_ctrl");
-    h->tcp_fd = _bft_ct_map_fd(h->obj, "ct_map_tcp");
-    h->tcp6_fd = _bft_ct_map_fd(h->obj, "ct_map_tcp6");
-    h->any_fd = _bft_ct_map_fd(h->obj, "ct_map_any");
-    h->any6_fd = _bft_ct_map_fd(h->obj, "ct_map_any6");
-    h->src_rate_fd = _bft_ct_map_fd(h->obj, "ct_src_rate");
-    h->src_count_fd = _bft_ct_map_fd(h->obj, "ct_src_count");
-    h->spi_reverse_fd = _bft_ct_map_fd(h->obj, "ct_spi_reverse");
-    h->stats_fd = _bft_ct_map_fd(h->obj, "ct_stats");
+    h->tcp_fd = _bft_ct_map_fd(h->obj, "bf_ct_map_tcp");
+    h->tcp6_fd = _bft_ct_map_fd(h->obj, "bf_ct_map_tcp6");
+    h->any_fd = _bft_ct_map_fd(h->obj, "bf_ct_map_any");
+    h->any6_fd = _bft_ct_map_fd(h->obj, "bf_ct_map_any6");
+    h->src_rate_fd = _bft_ct_map_fd(h->obj, "bf_ct_map_src_rate");
+    h->src_count_fd = _bft_ct_map_fd(h->obj, "bf_ct_map_src_count");
+    h->spi_reverse_fd = _bft_ct_map_fd(h->obj, "bf_ct_map_spi_reverse");
+    h->stats_fd = _bft_ct_map_fd(h->obj, "bf_ct_map_stats");
 
     if (h->ctrl_fd < 0 || h->tcp_fd < 0 || h->stats_fd < 0)
         return -ENOENT;

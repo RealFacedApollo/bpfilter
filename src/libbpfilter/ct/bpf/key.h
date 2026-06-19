@@ -195,13 +195,3 @@ bf_ct_bpf_is_reply_v6(const struct in6_addr *src, __u8 orig_lo_is_src,
         return bf_ct_bpf_compare_v6(src, hi_ip) == 0;
     return bf_ct_bpf_compare_v6(src, lo_ip) == 0;
 }
-
-struct bf_ct_bpf_maps;
-
-static __always_inline void *
-bf_ct_bpf_flow_map(const struct bf_ct_bpf_maps *maps, __u8 is_v6, __u8 proto)
-{
-    if (proto == IPPROTO_TCP)
-        return is_v6 ? maps->tcp6 : maps->tcp;
-    return is_v6 ? maps->any6 : maps->any;
-}

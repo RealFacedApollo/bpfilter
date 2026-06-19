@@ -73,6 +73,22 @@ struct
 
 struct
 {
+    __uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
+    __uint(max_entries, BF_CT_BPF_FLOW_MAP_MAX);
+    __type(key, struct ct_ip_key);
+    __type(value, struct ct_rate_entry);
+} bf_ct_map_src_rate SEC(".maps");
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, BF_CT_BPF_FLOW_MAP_MAX);
+    __type(key, struct ct_ip_key);
+    __type(value, struct ct_src_count_entry);
+} bf_ct_map_src_count SEC(".maps");
+
+struct
+{
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, BF_CT_BPF_FLOW_MAP_MAX);
     __type(key, struct ct_spi_reverse_key);
