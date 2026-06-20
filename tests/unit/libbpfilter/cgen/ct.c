@@ -72,25 +72,25 @@ static ssize_t _bft_ct_lookup_call_insn(const struct bf_program *program)
     return -1;
 }
 
-static bool _bft_ct_has_jmp_between(const struct bf_program *program,
-                                    ssize_t from, ssize_t to)
+/* Locate the unconditional jump (BPF_JA) emitted between the CT lookup call and
+ * the hairpin-skip store — the first-visit jump — and return the absolute index
+ * of its target instruction, or -1 if none is found. */
+static ssize_t _bft_ct_ja_target_between(const struct bf_program *program,
+                                         ssize_t from, ssize_t to)
 {
     ssize_t i;
 
     if (from < 0 || to < 0 || from >= to)
-        return false;
+        return -1;
 
     for (i = from + 1; i < to; ++i) {
         const struct bpf_insn *insn = bf_vector_get(&program->img, (size_t)i);
 
-        if (BPF_CLASS(insn->code) != BPF_JMP ||
-            BPF_OP(insn->code) == BPF_CALL)
-            continue;
-
-        return true;
+        if (BPF_CLASS(insn->code) == BPF_JMP && BPF_OP(insn->code) == BPF_JA)
+            return i + 1 + insn->off;
     }
 
-    return false;
+    return -1;
 }
 
 static ssize_t _bft_ct_insn_find_st_u8(const struct bf_program *program, int dst,
@@ -308,6 +308,11 @@ static void codegen_emits_ct_with_maps(void **state)
 
     assert_true(program->elfstubs_location[BF_ELFSTUB_CT_LOOKUP] > 0);
     assert_true(program->elfstubs_location[BF_ELFSTUB_CT_CREATE] > 0);
+    /* The FSM-update path must actually be emitted: a premature return in
+     * bf_ct_emit_update_fsm previously left the lookup and update stubs as dead
+     * code, freezing internal_state and giving established flows the short SYN
+     * timeout. */
+    assert_true(program->elfstubs_location[BF_ELFSTUB_CT_UPDATE_TCP] > 0);
     assert_true(program->img.size > 0);
     assert_int_equal(program->handle->n_segments, 1);
 
@@ -342,6 +347,7 @@ static void hairpin_first_visit_preserves_lookup(void **state)
     _free_bf_program_ struct bf_program *program = NULL;
     ssize_t lookup_insn;
     ssize_t hairpin_skip_insn;
+    ssize_t first_visit_target;
 
     (void)state;
 
@@ -355,12 +361,16 @@ static void hairpin_first_visit_preserves_lookup(void **state)
     lookup_insn = _bft_ct_lookup_call_insn(program);
     hairpin_skip_insn = _bft_ct_insn_find_st_u8(
         program, BPF_REG_10, BF_PROG_CTX_OFF(ct_hairpin_skip), 1);
+    first_visit_target =
+        _bft_ct_ja_target_between(program, lookup_insn, hairpin_skip_insn);
 
     assert_true(lookup_insn >= 0);
     assert_true(hairpin_skip_insn >= 0);
     assert_true(lookup_insn < hairpin_skip_insn);
-    assert_true(_bft_ct_has_jmp_between(program, lookup_insn,
-                                        hairpin_skip_insn));
+    /* The first-visit jump must skip over the hairpin-skip block: otherwise the
+     * conntrack state computed by the lookup is immediately overwritten with 0
+     * and every ct.conntrack matcher fails. */
+    assert_true(first_visit_target > hairpin_skip_insn);
 
     bf_ctx_teardown();
 }
