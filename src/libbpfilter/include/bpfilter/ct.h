@@ -247,6 +247,21 @@ struct ct_subprog_scratch
 {
     struct bf_ct_pkt_info pkt;
     struct ct_entry entry;
+    /** Local flow-key copy used for map lookups/updates (lookup and create
+     * stubs). Kept off the subprogram stack to stay within the combined stack
+     * budget. */
+    union {
+        struct ct_key_v4 key_v4;
+        struct ct_key_v6 key_v6;
+    } local;
+    /** ESP/AH reverse-SPI key: the reverse lookup in the lookup stub, then
+     * reused by the reply-recording path (the two uses are sequential). */
+    struct ct_spi_reverse_key rev_key;
+    /** Source-IP key for the rate/count maps (create stub). */
+    struct ct_ip_key ip_key;
+    /** Fresh values inserted into the rate/count maps (create stub). */
+    struct ct_rate_entry rate_fresh;
+    struct ct_src_count_entry count_fresh;
 };
 
 /**

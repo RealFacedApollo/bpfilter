@@ -42,19 +42,21 @@ static __always_inline __u32 bf_ct_bpf_src_count_limit(__u8 proto)
 
 static __always_inline int bf_ct_bpf_rate_check(void *src_rate_map,
                                                 const struct ct_ip_key *key,
-                                                __u8 proto, __u64 now_ns)
+                                                __u8 proto, __u64 now_ns,
+                                                struct ct_rate_entry *fresh)
 {
     struct ct_rate_entry *entry;
     __u32 limit = bf_ct_bpf_rate_limit(proto);
 
     entry = bpf_map_lookup_elem(src_rate_map, key);
     if (!entry) {
-        struct ct_rate_entry fresh = {
-            .window_start_ns = now_ns,
-            .pkt_count = 1,
-        };
+        /* fresh is staged in the per-CPU scratch map by the caller, to keep
+         * the subprogram's combined BPF stack within budget. */
+        __builtin_memset(fresh, 0, sizeof(*fresh));
+        fresh->window_start_ns = now_ns;
+        fresh->pkt_count = 1;
 
-        bpf_map_update_elem(src_rate_map, key, &fresh, BPF_ANY);
+        bpf_map_update_elem(src_rate_map, key, fresh, BPF_ANY);
         return 0;
     }
 
@@ -86,16 +88,17 @@ bf_ct_bpf_src_count_check(void *src_count_map, const struct ct_ip_key *key,
 }
 
 static __always_inline void
-bf_ct_bpf_src_count_inc(void *src_count_map, const struct ct_ip_key *key)
+bf_ct_bpf_src_count_inc(void *src_count_map, const struct ct_ip_key *key,
+                        struct ct_src_count_entry *fresh)
 {
     struct ct_src_count_entry *entry;
-    struct ct_src_count_entry fresh = {
-        .count = 1,
-    };
 
     entry = bpf_map_lookup_elem(src_count_map, key);
     if (!entry) {
-        bpf_map_update_elem(src_count_map, key, &fresh, BPF_ANY);
+        /* fresh is staged in the per-CPU scratch map by the caller. */
+        __builtin_memset(fresh, 0, sizeof(*fresh));
+        fresh->count = 1;
+        bpf_map_update_elem(src_count_map, key, fresh, BPF_ANY);
         return;
     }
 

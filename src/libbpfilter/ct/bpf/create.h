@@ -41,7 +41,7 @@ bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx,
                           struct ct_key_v4 *key, __u8 orig_lo_is_src)
 {
     struct ct_subprog_scratch *s = bf_ct_bpf_scratch();
-    struct ct_ip_key ip_key = {};
+    struct ct_ip_key *ip_key;
     struct ct_entry *entry;
     void *flow_map;
     __u64 now_ns;
@@ -49,21 +49,23 @@ bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx,
 
     if (!s)
         return 0;
-    /* The conntrack entry is staged in the per-CPU scratch map rather than on
-     * this subprogram's stack, to keep the combined BPF stack within budget. */
+    /* The conntrack entry and the rate/count working keys are staged in the
+     * per-CPU scratch map rather than on this subprogram's stack, to keep the
+     * combined BPF stack within budget. */
     entry = &s->entry;
     __builtin_memset(entry, 0, sizeof(*entry));
+    ip_key = &s->ip_key;
 
     now_ns = bpf_ktime_get_ns();
-    bf_ct_bpf_ip_key_from_v4(pkt->src_v4, &ip_key);
+    bf_ct_bpf_ip_key_from_v4(pkt->src_v4, ip_key);
 
-    if (bf_ct_bpf_rate_check((void *)&bf_ct_map_src_rate, &ip_key, pkt->proto,
-                             now_ns)) {
+    if (bf_ct_bpf_rate_check((void *)&bf_ct_map_src_rate, ip_key, pkt->proto,
+                             now_ns, &s->rate_fresh)) {
         bf_ct_bpf_stats_rate_drop((void *)&bf_ct_map_stats);
         return 0;
     }
 
-    if (bf_ct_bpf_src_count_check((void *)&bf_ct_map_src_count, &ip_key,
+    if (bf_ct_bpf_src_count_check((void *)&bf_ct_map_src_count, ip_key,
                                   pkt->proto)) {
         bf_ct_bpf_stats_count_drop((void *)&bf_ct_map_stats);
         return 0;
@@ -88,15 +90,18 @@ bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx,
     {
         /* Insert with a local key copy so the map operand stays a constant
          * map pointer (the relocatable global), independent of the call
-         * frame's spilled stack contents. */
-        struct ct_key_v4 local = *key;
+         * frame's spilled stack contents. The copy is staged in the scratch
+         * map to keep the combined BPF stack within budget. */
+        struct ct_key_v4 *local = &s->local.key_v4;
 
-        r = bpf_map_update_elem(flow_map, &local, entry, BPF_NOEXIST);
+        *local = *key;
+        r = bpf_map_update_elem(flow_map, local, entry, BPF_NOEXIST);
     }
     if (r)
         return 0;
 
-    bf_ct_bpf_src_count_inc((void *)&bf_ct_map_src_count, &ip_key);
+    bf_ct_bpf_src_count_inc((void *)&bf_ct_map_src_count, ip_key,
+                            &s->count_fresh);
     bf_ct_bpf_stats_new((void *)&bf_ct_map_stats, pkt->proto);
     return 1;
 }
@@ -107,7 +112,7 @@ bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx,
                           struct ct_key_v6 *key, __u8 orig_lo_is_src)
 {
     struct ct_subprog_scratch *s = bf_ct_bpf_scratch();
-    struct ct_ip_key ip_key = {};
+    struct ct_ip_key *ip_key;
     struct ct_entry *entry;
     void *flow_map;
     __u64 now_ns;
@@ -115,20 +120,22 @@ bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx,
 
     if (!s)
         return 0;
-    /* See bf_ct_bpf_create_entry_v4(): the entry is staged in scratch. */
+    /* See bf_ct_bpf_create_entry_v4(): entry and the rate/count keys are
+     * staged in scratch. */
     entry = &s->entry;
     __builtin_memset(entry, 0, sizeof(*entry));
+    ip_key = &s->ip_key;
 
     now_ns = bpf_ktime_get_ns();
-    bf_ct_bpf_ip_key_from_v6(&pkt->src_v6, &ip_key);
+    bf_ct_bpf_ip_key_from_v6(&pkt->src_v6, ip_key);
 
-    if (bf_ct_bpf_rate_check((void *)&bf_ct_map_src_rate, &ip_key, pkt->proto,
-                             now_ns)) {
+    if (bf_ct_bpf_rate_check((void *)&bf_ct_map_src_rate, ip_key, pkt->proto,
+                             now_ns, &s->rate_fresh)) {
         bf_ct_bpf_stats_rate_drop((void *)&bf_ct_map_stats);
         return 0;
     }
 
-    if (bf_ct_bpf_src_count_check((void *)&bf_ct_map_src_count, &ip_key,
+    if (bf_ct_bpf_src_count_check((void *)&bf_ct_map_src_count, ip_key,
                                   pkt->proto)) {
         bf_ct_bpf_stats_count_drop((void *)&bf_ct_map_stats);
         return 0;
@@ -151,15 +158,18 @@ bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx,
 
     flow_map = bf_ct_bpf_flow_map_global(1, pkt->proto);
     {
-        /* See bf_ct_bpf_create_entry_v4(): insert with a local key copy. */
-        struct ct_key_v6 local = *key;
+        /* See bf_ct_bpf_create_entry_v4(): insert with a local key copy staged
+         * in the scratch map. */
+        struct ct_key_v6 *local = &s->local.key_v6;
 
-        r = bpf_map_update_elem(flow_map, &local, entry, BPF_NOEXIST);
+        *local = *key;
+        r = bpf_map_update_elem(flow_map, local, entry, BPF_NOEXIST);
     }
     if (r)
         return 0;
 
-    bf_ct_bpf_src_count_inc((void *)&bf_ct_map_src_count, &ip_key);
+    bf_ct_bpf_src_count_inc((void *)&bf_ct_map_src_count, ip_key,
+                            &s->count_fresh);
     bf_ct_bpf_stats_new((void *)&bf_ct_map_stats, pkt->proto);
     return 1;
 }

@@ -26,70 +26,91 @@ bf_ct_bpf_lookup_entry_v4(struct ct_key_v4 *key, __u8 proto, __u32 spi)
     /* Look up with a local copy of the key. The flow and spi-reverse maps are
      * referenced as relocatable globals (bf_ct_bpf_flow_map_global,
      * &bf_ct_map_spi_reverse), so each map operand is a BPF_LD_MAP_FD constant
-     * the verifier always trusts — independent of the call frame. */
-    struct ct_key_v4 local = *key;
-    struct ct_spi_reverse_key rev_key = {};
+     * the verifier always trusts — independent of the call frame. The key copy
+     * and the reverse key are staged in the per-CPU scratch map rather than on
+     * this subprogram's stack, to keep the combined BPF stack within budget. */
+    struct ct_subprog_scratch *s = bf_ct_bpf_scratch();
+    struct ct_key_v4 *local;
+    struct ct_spi_reverse_key *rev_key;
     struct ct_entry *entry;
     void *map = bf_ct_bpf_flow_map_global(0, proto);
     __u32 *orig_spi;
 
-    entry = bpf_map_lookup_elem(map, &local);
+    if (!s)
+        return NULL;
+    local = &s->local.key_v4;
+    *local = *key;
+
+    entry = bpf_map_lookup_elem(map, local);
     if (entry)
         return entry;
 
     if (proto != IPPROTO_ESP && proto != IPPROTO_AH)
         return NULL;
 
-    rev_key.lo_ip = local.lo_ip;
-    rev_key.hi_ip = local.hi_ip;
-    rev_key.reply_spi = spi;
-    rev_key.proto = proto;
+    rev_key = &s->rev_key;
+    __builtin_memset(rev_key, 0, sizeof(*rev_key));
+    rev_key->lo_ip = local->lo_ip;
+    rev_key->hi_ip = local->hi_ip;
+    rev_key->reply_spi = spi;
+    rev_key->proto = proto;
 
-    orig_spi = bpf_map_lookup_elem((void *)&bf_ct_map_spi_reverse, &rev_key);
+    orig_spi = bpf_map_lookup_elem((void *)&bf_ct_map_spi_reverse, rev_key);
     if (!orig_spi)
         return NULL;
 
-    local.discriminator = *orig_spi;
+    local->discriminator = *orig_spi;
     key->discriminator = *orig_spi;
-    return bpf_map_lookup_elem(map, &local);
+    return bpf_map_lookup_elem(map, local);
 }
 
 static __always_inline struct ct_entry *
 bf_ct_bpf_lookup_entry_v6(struct ct_key_v6 *key, __u8 proto, __u32 spi)
 {
     /* See bf_ct_bpf_lookup_entry_v4(): maps are referenced as relocatable
-     * globals. */
-    struct ct_key_v6 local = *key;
-    struct ct_spi_reverse_key rev_key = {};
+     * globals, and the key copy / reverse key are staged in the scratch map. */
+    struct ct_subprog_scratch *s = bf_ct_bpf_scratch();
+    struct ct_key_v6 *local;
+    struct ct_spi_reverse_key *rev_key;
     struct ct_entry *entry;
     void *map = bf_ct_bpf_flow_map_global(1, proto);
     __u32 *orig_spi;
 
-    entry = bpf_map_lookup_elem(map, &local);
+    if (!s)
+        return NULL;
+    local = &s->local.key_v6;
+    *local = *key;
+
+    entry = bpf_map_lookup_elem(map, local);
     if (entry)
         return entry;
 
     if (proto != IPPROTO_ESP && proto != IPPROTO_AH)
         return NULL;
 
-    __builtin_memcpy(&rev_key.lo_ip, &local.lo_ip.s6_addr[12], sizeof(__be32));
-    __builtin_memcpy(&rev_key.hi_ip, &local.hi_ip.s6_addr[12], sizeof(__be32));
-    rev_key.reply_spi = spi;
-    rev_key.proto = proto;
+    rev_key = &s->rev_key;
+    __builtin_memset(rev_key, 0, sizeof(*rev_key));
+    __builtin_memcpy(&rev_key->lo_ip, &local->lo_ip.s6_addr[12],
+                     sizeof(__be32));
+    __builtin_memcpy(&rev_key->hi_ip, &local->hi_ip.s6_addr[12],
+                     sizeof(__be32));
+    rev_key->reply_spi = spi;
+    rev_key->proto = proto;
 
-    orig_spi = bpf_map_lookup_elem((void *)&bf_ct_map_spi_reverse, &rev_key);
+    orig_spi = bpf_map_lookup_elem((void *)&bf_ct_map_spi_reverse, rev_key);
     if (!orig_spi)
         return NULL;
 
-    local.discriminator = *orig_spi;
+    local->discriminator = *orig_spi;
     key->discriminator = *orig_spi;
-    return bpf_map_lookup_elem(map, &local);
+    return bpf_map_lookup_elem(map, local);
 }
 
 static __always_inline __u8
 bf_ct_bpf_lookup_hit(struct ct_entry *entry, __u8 is_reply, __u64 now_ns,
                      __u32 pkt_len, void *stats_map, void *spi_reverse_map,
-                     __be32 lo_ip, __be32 hi_ip, __u8 proto, __u32 pkt_spi)
+                     __be32 lo_ip, __be32 hi_ip, __u8 proto, __u32 pkt_spi,
+                     struct ct_spi_reverse_key *rev_key)
 {
     if (entry->flags & CT_FLAG_DYING)
         return CT_STATE_NEW;
@@ -110,7 +131,7 @@ bf_ct_bpf_lookup_hit(struct ct_entry *entry, __u8 is_reply, __u64 now_ns,
         }
         if ((proto == IPPROTO_ESP || proto == IPPROTO_AH) && spi_reverse_map)
             bf_ct_bpf_ipsec_record_reply(entry, spi_reverse_map, lo_ip, hi_ip,
-                                         proto, pkt_spi);
+                                         proto, pkt_spi, rev_key);
     } else {
         entry->rx_packets += 1;
         entry->rx_bytes += pkt_len;
@@ -157,16 +178,14 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
         else if (pkt->proto == IPPROTO_GRE)
             src_disc = pkt->gre_key;
 
-        struct in6_addr lo;
-        struct in6_addr hi;
-
         bf_ct_bpf_key_normalize_v6(&pkt->src_v6, &pkt->dst_v6, src_disc,
                                    dst_disc, pkt->proto, key_v6,
                                    &orig_lo_is_src);
-        lo = key_v6->lo_ip;
-        hi = key_v6->hi_ip;
-        *is_reply = bf_ct_bpf_is_reply_v6(&pkt->src_v6, orig_lo_is_src, &lo,
-                                          &hi);
+        /* Pass the normalized key fields directly to the inline reply check
+         * rather than copying them into stack-local in6_addr temporaries; the
+         * copies kept the subprogram's stack frame oversized. */
+        *is_reply = bf_ct_bpf_is_reply_v6(&pkt->src_v6, orig_lo_is_src,
+                                          &key_v6->lo_ip, &key_v6->hi_ip);
 
         entry = bf_ct_bpf_lookup_entry_v6(key_v6, pkt->proto, pkt->spi);
         if (!entry) {
@@ -178,14 +197,12 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
         }
 
         {
-            struct in6_addr lo6 = key_v6->lo_ip;
-            struct in6_addr hi6 = key_v6->hi_ip;
             __be32 lo_ip;
             __be32 hi_ip;
 
             *is_reply = bf_ct_bpf_is_reply_v6(&pkt->src_v6,
-                                              entry->orig_lo_is_src, &lo6,
-                                              &hi6);
+                                              entry->orig_lo_is_src,
+                                              &key_v6->lo_ip, &key_v6->hi_ip);
             __builtin_memcpy(&lo_ip, &key_v6->lo_ip.s6_addr[12],
                              sizeof(__be32));
             __builtin_memcpy(&hi_ip, &key_v6->hi_ip.s6_addr[12],
@@ -193,7 +210,8 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
             state = bf_ct_bpf_lookup_hit(entry, *is_reply, now_ns, ctx->pkt_size,
                                          (void *)&bf_ct_map_stats,
                                          (void *)&bf_ct_map_spi_reverse, lo_ip,
-                                         hi_ip, pkt->proto, pkt->spi);
+                                         hi_ip, pkt->proto, pkt->spi,
+                                         &s->rev_key);
         }
         key_v4->proto = 0;
         return state;
@@ -230,7 +248,7 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
                                      (void *)&bf_ct_map_stats,
                                      (void *)&bf_ct_map_spi_reverse,
                                      key_v4->lo_ip, key_v4->hi_ip, pkt->proto,
-                                     pkt->spi);
+                                     pkt->spi, &s->rev_key);
         key_v6->proto = 0;
         return state;
     }
