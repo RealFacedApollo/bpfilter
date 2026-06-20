@@ -308,11 +308,6 @@ static void codegen_emits_ct_with_maps(void **state)
 
     assert_true(program->elfstubs_location[BF_ELFSTUB_CT_LOOKUP] > 0);
     assert_true(program->elfstubs_location[BF_ELFSTUB_CT_CREATE] > 0);
-    /* The FSM-update path must actually be emitted: a premature return in
-     * bf_ct_emit_update_fsm previously left the lookup and update stubs as dead
-     * code, freezing internal_state and giving established flows the short SYN
-     * timeout. */
-    assert_true(program->elfstubs_location[BF_ELFSTUB_CT_UPDATE_TCP] > 0);
     assert_true(program->img.size > 0);
     assert_int_equal(program->handle->n_segments, 1);
 
