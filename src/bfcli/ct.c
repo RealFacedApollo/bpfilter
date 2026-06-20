@@ -78,6 +78,8 @@ int bfc_ct_gc_run(const struct bfc_opts *opts)
     struct bf_ct_gc gc;
     struct bf_ct_gc_opts gc_opts;
     unsigned interval;
+    unsigned reconcile_every;
+    unsigned since_reconcile = 0;
     int r;
 
     assert(opts);
@@ -93,12 +95,28 @@ int bfc_ct_gc_run(const struct bfc_opts *opts)
     interval =
         opts->gc_interval_sec ? opts->gc_interval_sec : BF_CT_GC_INTERVAL_SEC;
 
+    /* sweep_batch decrements src_count only for entries it reaps; LRU evictions
+     * bypass it, so the count drifts up over time. Periodically rebuild it from
+     * the live entries. Aim for roughly one reconciliation per minute,
+     * regardless of the sweep interval. */
+    reconcile_every = (60u + interval - 1) / (interval ? interval : 1);
+    if (!reconcile_every)
+        reconcile_every = 1;
+
     bf_ct_gc_init(&gc);
 
     while (!_bfc_ct_gc_stop) {
         r = bf_ct_gc_sweep_batch(maps, &gc, &gc_opts);
         if (r)
             return r;
+
+        if (++since_reconcile >= reconcile_every) {
+            r = bf_ct_gc_reconcile_src_count(maps);
+            if (r)
+                return r;
+
+            since_reconcile = 0;
+        }
 
         for (unsigned i = 0; i < interval && !_bfc_ct_gc_stop; ++i)
             sleep(1);

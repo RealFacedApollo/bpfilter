@@ -30,6 +30,17 @@ static __be32 _be32(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
     return val;
 }
 
+static struct in6_addr _in6(uint8_t last)
+{
+    struct in6_addr addr = {};
+
+    addr.s6_addr[0] = 0x20;
+    addr.s6_addr[1] = 0x01;
+    addr.s6_addr[15] = last;
+
+    return addr;
+}
+
 static void _bft_require_bpffs(void)
 {
     if (access("/sys/fs/bpf", F_OK) != 0)
@@ -193,6 +204,135 @@ static void gc_two_phase_eviction(void **state)
                 stats_before.gc_phase2_deleted + 1);
 }
 
+/* Reaping a dying IPv6 entry must decrement the per-source count. The source is
+ * reconstructed from the flow key (orig_src_ip only holds 4 bytes of a v6
+ * address), so a v4-keyed decrement would miss the entry entirely. */
+static void gc_v6_src_count_decrement(void **state)
+{
+    const struct bf_ct_maps *maps = bf_ctx_get_ct_maps();
+    struct ct_key_v6 key = {
+        .lo_ip = _in6(1),
+        .hi_ip = _in6(2),
+        .discriminator = (443u << 16) | 55000u,
+        .proto = IPPROTO_TCP,
+    };
+    struct ct_entry entry = {
+        .proto = IPPROTO_TCP,
+        .flags = CT_FLAG_DYING,
+        .orig_lo_is_src = 1,
+    };
+    struct ct_ip_key ip_key;
+    struct ct_src_count_entry count = {.count = 1};
+    struct bf_ct_gc gc;
+    struct bf_ct_gc_opts opts = {.batch_size = 100};
+    int tcp6_fd;
+    int src_count_fd;
+    int r;
+
+    (void)state;
+
+    assert_non_null(maps);
+
+    tcp6_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_TCP6);
+    src_count_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_SRC_COUNT);
+    assert_int_gte(tcp6_fd, 0);
+    assert_int_gte(src_count_fd, 0);
+
+    r = bf_bpf_map_update_elem(tcp6_fd, &key, &entry, BPF_ANY);
+    assert_ok(r);
+
+    /* The source is key.lo_ip because orig_lo_is_src is set. */
+    bf_ct_ip_key_from_v6(&key.lo_ip, &ip_key);
+    r = bf_bpf_map_update_elem(src_count_fd, &ip_key, &count, BPF_ANY);
+    assert_ok(r);
+
+    bf_ct_gc_init(&gc);
+    assert_ok(bf_ct_gc_sweep_batch(maps, &gc, &opts));
+
+    r = bf_bpf_map_lookup_elem(tcp6_fd, &key, &entry);
+    assert_int_equal(r, -ENOENT);
+
+    /* count dropped from 1 to 0, so the entry is removed. */
+    r = bf_bpf_map_lookup_elem(src_count_fd, &ip_key, &count);
+    assert_int_equal(r, -ENOENT);
+}
+
+/* Reconciliation rebuilds src_count from the live flow entries: an inflated
+ * count is corrected down to the true number of connections, and a source with
+ * no live entry is pruned. Covers both an IPv4 and an IPv6 source. */
+static void gc_reconcile_rebuilds_src_count(void **state)
+{
+    const struct bf_ct_maps *maps = bf_ctx_get_ct_maps();
+    struct ct_key_v4 k4a = {
+        .lo_ip = _be32(10, 0, 0, 1),
+        .hi_ip = _be32(10, 0, 0, 9),
+        .discriminator = (80u << 16) | 40000u,
+        .proto = IPPROTO_TCP,
+    };
+    struct ct_key_v4 k4b = {
+        .lo_ip = _be32(10, 0, 0, 1),
+        .hi_ip = _be32(10, 0, 0, 9),
+        .discriminator = (80u << 16) | 40001u,
+        .proto = IPPROTO_TCP,
+    };
+    struct ct_key_v6 k6 = {
+        .lo_ip = _in6(1),
+        .hi_ip = _in6(2),
+        .discriminator = (443u << 16) | 55000u,
+        .proto = IPPROTO_TCP,
+    };
+    struct ct_entry entry = {.proto = IPPROTO_TCP, .orig_lo_is_src = 1};
+    struct ct_ip_key ip_v4;
+    struct ct_ip_key ip_v6;
+    struct ct_ip_key ip_stale;
+    struct ct_src_count_entry count;
+    int tcp_fd;
+    int tcp6_fd;
+    int src_count_fd;
+    int r;
+
+    (void)state;
+
+    assert_non_null(maps);
+
+    tcp_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_TCP);
+    tcp6_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_TCP6);
+    src_count_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_SRC_COUNT);
+    assert_int_gte(tcp_fd, 0);
+    assert_int_gte(tcp6_fd, 0);
+    assert_int_gte(src_count_fd, 0);
+
+    /* Two live v4 connections share source 10.0.0.1; one live v6 connection. */
+    assert_ok(bf_bpf_map_update_elem(tcp_fd, &k4a, &entry, BPF_ANY));
+    assert_ok(bf_bpf_map_update_elem(tcp_fd, &k4b, &entry, BPF_ANY));
+    assert_ok(bf_bpf_map_update_elem(tcp6_fd, &k6, &entry, BPF_ANY));
+
+    bf_ct_ip_key_from_v4(k4a.lo_ip, &ip_v4);
+    bf_ct_ip_key_from_v6(&k6.lo_ip, &ip_v6);
+    bf_ct_ip_key_from_v4(_be32(192, 168, 0, 5), &ip_stale);
+
+    /* Drift: v4 inflated to 5, v6 inflated to 3, plus a stale source with no
+     * live entry. */
+    count.count = 5;
+    count._pad = 0;
+    assert_ok(bf_bpf_map_update_elem(src_count_fd, &ip_v4, &count, BPF_ANY));
+    count.count = 3;
+    assert_ok(bf_bpf_map_update_elem(src_count_fd, &ip_v6, &count, BPF_ANY));
+    count.count = 7;
+    assert_ok(bf_bpf_map_update_elem(src_count_fd, &ip_stale, &count, BPF_ANY));
+
+    assert_ok(bf_ct_gc_reconcile_src_count(maps));
+
+    assert_ok(bf_bpf_map_lookup_elem(src_count_fd, &ip_v4, &count));
+    assert_int_equal(count.count, 2);
+
+    assert_ok(bf_bpf_map_lookup_elem(src_count_fd, &ip_v6, &count));
+    assert_int_equal(count.count, 1);
+
+    r = bf_bpf_map_lookup_elem(src_count_fd, &ip_stale, &count);
+    assert_int_equal(r, -ENOENT);
+}
+
 static void gc_heartbeat_updates_meta(void **state)
 {
     const struct bf_ct_maps *maps = bf_ctx_get_ct_maps();
@@ -214,6 +354,12 @@ int main(void)
 {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test_setup_teardown(gc_two_phase_eviction,
+                                        _bft_setup_ctx_bpffs_ct,
+                                        _bft_teardown_ctx_bpffs),
+        cmocka_unit_test_setup_teardown(gc_v6_src_count_decrement,
+                                        _bft_setup_ctx_bpffs_ct,
+                                        _bft_teardown_ctx_bpffs),
+        cmocka_unit_test_setup_teardown(gc_reconcile_rebuilds_src_count,
                                         _bft_setup_ctx_bpffs_ct,
                                         _bft_teardown_ctx_bpffs),
         cmocka_unit_test_setup_teardown(gc_heartbeat_updates_meta,

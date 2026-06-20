@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -121,13 +122,38 @@ static int _bf_ct_gc_stats_inc(int stats_fd, __u64 *phase1, __u64 *phase2)
     return r;
 }
 
-static int _bf_ct_gc_src_count_dec(int src_count_fd, __be32 orig_src_ip)
+/* Reconstruct the per-source key for the rate/count maps from a flow key.
+ *
+ * The flow key holds the full source and destination addresses (normalized to
+ * lo_ip/hi_ip); @c orig_lo_is_src records which side was the connection's
+ * originator. Deriving the source from the key matches what the datapath does
+ * at create time and, crucially, works for IPv6: @ref ct_entry only stores the
+ * low four bytes of a v6 source in @c orig_src_ip, which is not enough to
+ * rebuild the key. */
+static void _bf_ct_gc_src_ip_key(const void *key, bool is_v6,
+                                 __u8 orig_lo_is_src, struct ct_ip_key *ip_key)
+{
+    if (is_v6) {
+        const struct ct_key_v6 *k = key;
+        const struct in6_addr *src = orig_lo_is_src ? &k->lo_ip : &k->hi_ip;
+
+        bf_ct_ip_key_from_v6(src, ip_key);
+    } else {
+        const struct ct_key_v4 *k = key;
+        __be32 src = orig_lo_is_src ? k->lo_ip : k->hi_ip;
+
+        bf_ct_ip_key_from_v4(src, ip_key);
+    }
+}
+
+static int _bf_ct_gc_src_count_dec(int src_count_fd, const void *key,
+                                   bool is_v6, __u8 orig_lo_is_src)
 {
     struct ct_ip_key ip_key;
     struct ct_src_count_entry entry;
     int r;
 
-    bf_ct_ip_key_from_v4(orig_src_ip, &ip_key);
+    _bf_ct_gc_src_ip_key(key, is_v6, orig_lo_is_src, &ip_key);
 
     r = bf_bpf_map_lookup_elem(src_count_fd, &ip_key, &entry);
     if (r) {
@@ -147,7 +173,7 @@ static int _bf_ct_gc_src_count_dec(int src_count_fd, __be32 orig_src_ip)
 }
 
 static int _bf_ct_gc_process_entry(int map_fd, int src_count_fd,
-                                   const void *key,
+                                   const void *key, bool is_v6,
                                    const struct ct_entry *entry,
                                    const struct ct_timeouts *timeouts,
                                    __u64 now_ns, __u64 *phase1, __u64 *phase2)
@@ -160,7 +186,8 @@ static int _bf_ct_gc_process_entry(int map_fd, int src_count_fd,
         if (r)
             return r;
 
-        r = _bf_ct_gc_src_count_dec(src_count_fd, entry->orig_src_ip);
+        r = _bf_ct_gc_src_count_dec(src_count_fd, key, is_v6,
+                                    entry->orig_lo_is_src);
         if (r)
             return r;
 
@@ -227,7 +254,8 @@ static int _bf_ct_gc_sweep_map(int map_fd, int src_count_fd,
             return r;
         }
 
-        r = _bf_ct_gc_process_entry(map_fd, src_count_fd, lookup_key, &entry,
+        r = _bf_ct_gc_process_entry(map_fd, src_count_fd, lookup_key,
+                                    _bf_ct_gc_map_is_v6[map_idx], &entry,
                                     timeouts, now_ns, phase1, phase2);
         if (r)
             return r;
@@ -318,6 +346,152 @@ int bf_ct_gc_sweep_batch(const struct bf_ct_maps *maps, struct bf_ct_gc *gc,
     return 0;
 }
 
+static int _bf_ct_gc_ip_key_cmp(const void *a, const void *b)
+{
+    return memcmp(a, b, sizeof(struct ct_ip_key));
+}
+
+/* Append the source key of every live entry in @p map_fd to @p arr, growing it
+ * as needed. The array is the userspace accumulator for the src_count
+ * reconciliation: one element per flow entry, later sorted to tally per-source
+ * counts. */
+static int _bf_ct_gc_collect_sources(int map_fd, bool is_v6,
+                                     struct ct_ip_key **arr, size_t *len,
+                                     size_t *cap)
+{
+    char prev_key[sizeof(struct ct_key_v6)];
+    char next_key[sizeof(struct ct_key_v6)];
+    const void *prev = NULL;
+    struct ct_entry entry;
+    size_t key_size = is_v6 ? sizeof(struct ct_key_v6) :
+                              sizeof(struct ct_key_v4);
+    int r;
+
+    while (true) {
+        r = bf_bpf_map_get_next_key(map_fd, prev, next_key);
+        if (r == -ENOENT)
+            break;
+        if (r)
+            return r;
+
+        memcpy(prev_key, next_key, key_size);
+        prev = prev_key;
+
+        r = bf_bpf_map_lookup_elem(map_fd, next_key, &entry);
+        if (r) {
+            if (r == -ENOENT)
+                continue;
+            return r;
+        }
+
+        if (*len == *cap) {
+            size_t ncap = *cap ? *cap * 2 : 1024;
+            struct ct_ip_key *narr = realloc(*arr, ncap * sizeof(**arr));
+
+            if (!narr)
+                return -ENOMEM;
+            *arr = narr;
+            *cap = ncap;
+        }
+
+        _bf_ct_gc_src_ip_key(next_key, is_v6, entry.orig_lo_is_src,
+                             &(*arr)[*len]);
+        (*len)++;
+    }
+
+    return 0;
+}
+
+/* Delete src_count entries whose source no longer appears in the (sorted)
+ * live-source set @p srcs. Mirrors the delete-while-iterating cursor handling
+ * used by _bf_ct_gc_sweep_map(). */
+static int _bf_ct_gc_prune_src_count(int src_count_fd,
+                                     const struct ct_ip_key *srcs, size_t len)
+{
+    struct ct_ip_key prev_key;
+    struct ct_ip_key next_key;
+    const void *prev = NULL;
+    int r;
+
+    while (true) {
+        r = bf_bpf_map_get_next_key(src_count_fd, prev, &next_key);
+        if (r == -ENOENT)
+            break;
+        if (r)
+            return r;
+
+        prev_key = next_key;
+        prev = &prev_key;
+
+        if (!bsearch(&next_key, srcs, len, sizeof(*srcs),
+                     _bf_ct_gc_ip_key_cmp)) {
+            r = bf_bpf_map_delete_elem(src_count_fd, &next_key);
+            if (r && r != -ENOENT)
+                return r;
+        }
+    }
+
+    return 0;
+}
+
+int bf_ct_gc_reconcile_src_count(const struct bf_ct_maps *maps)
+{
+    struct ct_ip_key *srcs = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    size_t i;
+    int src_count_fd;
+    int r;
+
+    assert(maps);
+
+    src_count_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_SRC_COUNT);
+    if (src_count_fd < 0)
+        return src_count_fd;
+
+    for (int m = 0; m < _BF_CT_GC_FLOW_MAPS; ++m) {
+        int map_fd = bf_ct_maps_get_fd(maps, _bf_ct_gc_map_ids[m]);
+
+        if (map_fd < 0) {
+            r = map_fd;
+            goto out;
+        }
+
+        r = _bf_ct_gc_collect_sources(map_fd, _bf_ct_gc_map_is_v6[m], &srcs,
+                                      &len, &cap);
+        if (r)
+            goto out;
+    }
+
+    qsort(srcs, len, sizeof(*srcs), _bf_ct_gc_ip_key_cmp);
+
+    /* Walk sorted runs of identical sources and write the recomputed count.
+     * Writing the exact value (rather than zero-then-increment) avoids a window
+     * where the datapath cap check could see an under-count. */
+    i = 0;
+    while (i < len) {
+        struct ct_src_count_entry count;
+        size_t j = i + 1;
+
+        while (j < len && memcmp(&srcs[i], &srcs[j], sizeof(srcs[i])) == 0)
+            j++;
+
+        count.count = (__u32)(j - i);
+        count._pad = 0;
+        r = bf_bpf_map_update_elem(src_count_fd, &srcs[i], &count, BPF_ANY);
+        if (r)
+            goto out;
+
+        i = j;
+    }
+
+    r = _bf_ct_gc_prune_src_count(src_count_fd, srcs, len);
+
+out:
+    free(srcs);
+    return r;
+}
+
 int bf_ct_gc_sweep_full(const struct bf_ct_maps *maps, struct bf_ct_gc *gc,
                         const struct bf_ct_gc_opts *opts)
 {
@@ -353,5 +527,9 @@ int bf_ct_gc_sweep_full(const struct bf_ct_maps *maps, struct bf_ct_gc *gc,
             return r;
     } while (true);
 
-    return 0;
+    /* Every live entry has now been visited once. Rebuild src_count from the
+     * surviving flow entries so it self-heals from LRU evictions (which delete
+     * flow entries without running the GC decrement) and from any incremental
+     * drift. */
+    return bf_ct_gc_reconcile_src_count(maps);
 }

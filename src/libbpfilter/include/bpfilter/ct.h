@@ -544,9 +544,27 @@ int bf_ct_gc_sweep_batch(const struct bf_ct_maps *maps, struct bf_ct_gc *gc,
 
 /**
  * @brief Sweep all flow maps until every entry has been visited once.
+ *
+ * Concludes by reconciling the per-source count map via
+ * @ref bf_ct_gc_reconcile_src_count.
  */
 int bf_ct_gc_sweep_full(const struct bf_ct_maps *maps, struct bf_ct_gc *gc,
                         const struct bf_ct_gc_opts *opts);
+
+/**
+ * @brief Rebuild the per-source connection count map from live flow entries.
+ *
+ * The datapath increments @c ct_src_count on connection creation and the GC
+ * decrements it when a dying entry is reaped. Neither path observes LRU
+ * evictions, so the count drifts upward over time and can eventually wedge a
+ * source at its connection cap. This pass recomputes the exact per-source
+ * counts from the surviving entries in every flow map and overwrites the map,
+ * pruning sources that no longer have any live connection.
+ *
+ * @param maps Conntrack map set. Can't be NULL.
+ * @return 0 on success, or a negative errno value on failure.
+ */
+int bf_ct_gc_reconcile_src_count(const struct bf_ct_maps *maps);
 
 /**
  * @brief Create conntrack maps and pin them under @c pindir_fd/ct/.
