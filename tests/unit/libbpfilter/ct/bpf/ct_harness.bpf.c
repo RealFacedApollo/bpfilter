@@ -190,13 +190,10 @@ int ct_harness(struct __sk_buff *skb)
     struct ct_test_ctrl *ctrl;
     struct ct_key_v4 key_v4 = {};
     struct ct_key_v6 key_v6 = {};
-    struct ct_entry *entry;
-    void *flow_map;
     __u32 ctrl_key = 0;
     __u8 is_reply = 0;
     __u8 state;
     __u8 is_v6 = 0;
-    struct bf_ct_pkt_info pkt = {};
     struct bf_runtime *ctx;
     struct ct_test_runtime_val *storage;
 
@@ -214,26 +211,11 @@ int ct_harness(struct __sk_buff *skb)
     if (_ct_harness_fill_runtime(skb, ctx))
         return TC_ACT_UNSPEC;
 
+    /* bf_ct_bpf_lookup() advances the protocol FSM in-line on a hit (see
+     * bf_ct_bpf_advance_fsm), so the LOOKUP_UPDATE_TCP op needs no separate
+     * update step here; it differs from LOOKUP only in also driving creation. */
     state = bf_ct_bpf_lookup(ctx, &key_v4, &key_v6, &is_reply);
     is_v6 = key_v6.proto != 0;
-
-    if (ctrl->op >= CT_TEST_OP_LOOKUP_UPDATE_TCP &&
-        bf_ct_bpf_parse_runtime(ctx, &pkt) == 0) {
-        flow_map = bf_ct_bpf_flow_map_global(is_v6, pkt.proto);
-        entry = is_v6 ? bpf_map_lookup_elem(flow_map, &key_v6)
-                      : bpf_map_lookup_elem(flow_map, &key_v4);
-        if (entry) {
-            if (pkt.proto == IPPROTO_TCP && pkt.has_l4) {
-                const struct tcphdr *tcp = bf_ct_bpf_l4(ctx);
-
-                if (tcp)
-                    bf_ct_bpf_tcp_fsm(entry, tcp, is_reply);
-            } else if (pkt.proto == IPPROTO_SCTP) {
-                bf_ct_bpf_sctp_fsm(entry, pkt.sctp_chunk, is_reply);
-            }
-            state = bf_ct_entry_to_rule_state(entry, is_reply);
-        }
-    }
 
     if (ctrl->op >= CT_TEST_OP_LOOKUP_CREATE)
         bf_ct_bpf_create_if_new(ctx, state, is_v6, &key_v4, &key_v6);

@@ -190,22 +190,6 @@ enum bf_elfstub_id
      */
     BF_ELFSTUB_CT_CREATE,
 
-    /**
-     * Advance the TCP internal FSM for an existing entry.
-     *
-     * `void bf_ct_update_tcp_state(struct ct_entry *entry,
-     *                              const struct tcphdr *tcp, __u8 is_reply)`
-     */
-    BF_ELFSTUB_CT_UPDATE_TCP,
-
-    /**
-     * Advance the SCTP internal FSM for an existing entry.
-     *
-     * `void bf_ct_update_sctp_state(struct ct_entry *entry, __u8 chunk_type,
-     *                               __u8 is_reply)`
-     */
-    BF_ELFSTUB_CT_UPDATE_SCTP,
-
     _BF_ELFSTUB_MAX,
 };
 

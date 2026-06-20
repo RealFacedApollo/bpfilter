@@ -127,8 +127,6 @@ bf_target_add_elfstubs(libbpfilter
         "sock_addr_log"
         "ct_lookup"
         "ct_create"
-        "ct_update_tcp"
-        "ct_update_sctp"
 )
 
 target_compile_definitions(libbpfilter

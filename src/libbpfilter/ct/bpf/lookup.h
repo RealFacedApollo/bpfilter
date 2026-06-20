@@ -140,6 +140,26 @@ bf_ct_bpf_lookup_hit(struct ct_entry *entry, __u8 is_reply, __u64 now_ns,
     return bf_ct_entry_to_rule_state(entry, is_reply);
 }
 
+/* Advance the protocol FSM for a hit entry, using the L4 flags already parsed
+ * into @pkt by bf_ct_bpf_parse_runtime(). This runs in the same subprogram as
+ * the lookup, so @entry stays a verified map-value pointer and the flags are
+ * plain scalars — no separate update stub and no packet dereference, which is
+ * what the former CT_UPDATE_TCP/SCTP elfstub calls could not get past the
+ * verifier. The rule-visible state was already derived by
+ * bf_ct_bpf_lookup_hit() before this point, so advancing here keeps the
+ * "classify, then advance" ordering of the original design. */
+static __always_inline void
+bf_ct_bpf_advance_fsm(struct ct_entry *entry, const struct bf_ct_pkt_info *pkt,
+                      __u8 is_reply)
+{
+    if (pkt->proto == IPPROTO_TCP) {
+        bf_ct_bpf_tcp_fsm(entry, pkt->tcp_syn, pkt->tcp_ack, pkt->tcp_rst,
+                          pkt->tcp_fin, is_reply);
+    } else if (pkt->proto == IPPROTO_SCTP) {
+        bf_ct_bpf_sctp_fsm(entry, pkt->sctp_chunk, is_reply);
+    }
+}
+
 static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
                                              struct ct_key_v4 *key_v4,
                                              struct ct_key_v6 *key_v6,
@@ -213,6 +233,7 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
                                          hi_ip, pkt->proto, pkt->spi,
                                          &s->rev_key);
         }
+        bf_ct_bpf_advance_fsm(entry, pkt, *is_reply);
         key_v4->proto = 0;
         return state;
     }
@@ -249,6 +270,7 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
                                      (void *)&bf_ct_map_spi_reverse,
                                      key_v4->lo_ip, key_v4->hi_ip, pkt->proto,
                                      pkt->spi, &s->rev_key);
+        bf_ct_bpf_advance_fsm(entry, pkt, *is_reply);
         key_v6->proto = 0;
         return state;
     }

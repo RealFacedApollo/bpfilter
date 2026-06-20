@@ -39,35 +39,41 @@ bf_ct_entry_to_rule_state(const struct ct_entry *e, bool is_reply)
     return CT_STATE_NEW;
 }
 
+/* The TCP flags are passed as scalars already extracted by the parse step
+ * (see bf_ct_bpf_parse_runtime), not as a raw packet pointer. The FSM only
+ * reads/writes the conntrack entry, which the caller holds as a verified
+ * map-value pointer, so this advance carries no packet dereference for the
+ * verifier to re-prove. */
 static __always_inline void
-bf_ct_bpf_tcp_fsm(struct ct_entry *e, const struct tcphdr *tcp, __u8 is_reply)
+bf_ct_bpf_tcp_fsm(struct ct_entry *e, __u8 syn, __u8 ack, __u8 rst, __u8 fin,
+                  __u8 is_reply)
 {
-    if (tcp->rst) {
+    if (rst) {
         e->internal_state = CT_TCP_CLOSE;
         e->flags |= CT_FLAG_DYING | CT_FLAG_INVALID;
         return;
     }
 
-    if (e->internal_state >= CT_TCP_ESTABLISHED && tcp->syn && is_reply)
+    if (e->internal_state >= CT_TCP_ESTABLISHED && syn && is_reply)
         e->flags |= CT_FLAG_INVALID;
 
     switch ((enum ct_tcp_state)e->internal_state) {
     case CT_TCP_SYN_SENT:
-        if (tcp->syn && tcp->ack)
+        if (syn && ack)
             e->internal_state = CT_TCP_SYN_RECV;
         break;
     case CT_TCP_SYN_RECV:
-        if (tcp->ack && !tcp->syn) {
+        if (ack && !syn) {
             e->internal_state = CT_TCP_ESTABLISHED;
             e->flags |= CT_FLAG_ASSURED | CT_FLAG_SEEN_REPLY;
         }
         break;
     case CT_TCP_ESTABLISHED:
-        if (tcp->fin)
+        if (fin)
             e->internal_state = CT_TCP_FIN_WAIT;
         break;
     case CT_TCP_FIN_WAIT:
-        if (tcp->fin && tcp->ack)
+        if (fin && ack)
             e->internal_state = CT_TCP_TIME_WAIT;
         break;
     default:

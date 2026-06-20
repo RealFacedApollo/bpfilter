@@ -465,159 +465,6 @@ int bf_ct_emit_match(struct bf_program *program,
     return 0;
 }
 
-static int _bf_ct_emit_map_select(struct bf_program *program, int proto,
-                                  enum bf_ct_map_id tcp_map,
-                                  enum bf_ct_map_id any_map)
-{
-    {
-        _clean_bf_jmpctx_ struct bf_jmpctx not_tcp =
-            bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JNE, BPF_REG_8, proto, 0));
-
-        EMIT_LOAD_CT_MAP_FD_FIXUP(program, BPF_REG_1, any_map);
-        {
-            _clean_bf_jmpctx_ struct bf_jmpctx past_tcp =
-                bf_jmpctx_get(program, BPF_JMP_A(0));
-
-            (void)past_tcp;
-        }
-    }
-
-    EMIT_LOAD_CT_MAP_FD_FIXUP(program, BPF_REG_1, tcp_map);
-
-    return 0;
-}
-
-static int _bf_ct_emit_entry_lookup(struct bf_program *program)
-{
-    int r;
-
-    EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_10,
-                              _BF_CT_RUNTIME_OFF(ct_is_v6)));
-    {
-        _clean_bf_jmpctx_ struct bf_jmpctx v6 =
-            bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JNE, BPF_REG_1, 0, 0));
-
-        r = _bf_ct_emit_map_select(program, IPPROTO_TCP, BF_CT_MAP_TCP6,
-                                   BF_CT_MAP_ANY6);
-        if (r)
-            return r;
-
-        EMIT(program, BPF_MOV64_REG(BPF_REG_2, BPF_REG_10));
-        EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_2,
-                                    _BF_CT_RUNTIME_OFF(ct_key_v6)));
-        EMIT(program, BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem));
-
-        return 0;
-    }
-
-    r = _bf_ct_emit_map_select(program, IPPROTO_TCP, BF_CT_MAP_TCP,
-                               BF_CT_MAP_ANY);
-    if (r)
-        return r;
-
-    EMIT(program, BPF_MOV64_REG(BPF_REG_2, BPF_REG_10));
-    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_2,
-                                _BF_CT_RUNTIME_OFF(ct_key_v4)));
-    EMIT(program, BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem));
-
-    return 0;
-}
-
-static int _bf_ct_emit_tcp_update(struct bf_program *program)
-{
-    EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_3, BPF_REG_10,
-                              _BF_CT_RUNTIME_OFF(ct_is_reply)));
-    EMIT(program, BPF_LDX_MEM(BPF_DW, BPF_REG_2, BPF_REG_10,
-                              _BF_CT_RUNTIME_OFF(l4_hdr)));
-    EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_0));
-    EMIT_FIXUP_ELFSTUB(program, BF_ELFSTUB_CT_UPDATE_TCP);
-
-    return 0;
-}
-
-static int _bf_ct_emit_sctp_update(struct bf_program *program)
-{
-    EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_3, BPF_REG_10,
-                              _BF_CT_RUNTIME_OFF(ct_is_reply)));
-    EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_2, BPF_REG_10,
-                              _BF_CT_RUNTIME_OFF(l4_hdr)));
-    EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_0));
-    EMIT_FIXUP_ELFSTUB(program, BF_ELFSTUB_CT_UPDATE_SCTP);
-
-    return 0;
-}
-
-int bf_ct_emit_update_fsm(struct bf_program *program)
-{
-    int r;
-
-    if (!bf_program_chain_uses_ct(program))
-        return 0;
-
-    EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_10,
-                              _BF_CT_RUNTIME_OFF(ct_hairpin_skip)));
-    {
-        _clean_bf_jmpctx_ struct bf_jmpctx hairpin =
-            bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JNE, BPF_REG_1, 0, 0));
-
-        {
-            /* The inline FSM-update path (entry lookup + CT_UPDATE_TCP/SCTP
-             * stubs) is intentionally stubbed out: as currently emitted it does
-             * not pass the verifier (the update stubs are reached with the
-             * rule-state scalar in R0 instead of a conntrack-entry pointer).
-             * Rule classification no longer depends on the FSM — a reply is
-             * classified ESTABLISHED from the seen-reply flag set in the lookup
-             * stub (see bf_ct_entry_to_rule_state) — so leaving the FSM
-             * un-advanced is load-safe. The remaining cost is that
-             * internal_state stays at its initial value, so established flows
-             * use the SYN timeout (see bf_ct_get_timeout_ns); fixing that needs
-             * the update path reworked to verify, which is tracked separately. */
-            {
-                _clean_bf_jmpctx_ struct bf_jmpctx not_tcp =
-                    bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JNE, BPF_REG_8,
-                                                         IPPROTO_TCP, 0));
-
-                {
-                    _clean_bf_jmpctx_ struct bf_jmpctx not_sctp =
-                        bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JNE, BPF_REG_8,
-                                                           IPPROTO_SCTP, 0));
-
-                    return 0;
-                }
-
-                r = _bf_ct_emit_entry_lookup(program);
-                if (r)
-                    return r;
-
-                {
-                    _clean_bf_jmpctx_ struct bf_jmpctx miss =
-                        bf_jmpctx_get(program,
-                                      BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 0));
-
-                    return 0;
-                }
-
-                return _bf_ct_emit_sctp_update(program);
-            }
-
-            r = _bf_ct_emit_entry_lookup(program);
-            if (r)
-                return r;
-
-            {
-                _clean_bf_jmpctx_ struct bf_jmpctx miss =
-                    bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 0));
-
-                return 0;
-            }
-
-            return _bf_ct_emit_tcp_update(program);
-        }
-    }
-
-    return 0;
-}
-
 static int _bf_ct_emit_create(struct bf_program *program)
 {
     /* Build struct bf_ct_create_args in the scratch area: key_v4 (offset 0),
@@ -650,32 +497,36 @@ static int _bf_ct_emit_create(struct bf_program *program)
 
 int bf_ct_emit_create_if_new(struct bf_program *program, bool notrack)
 {
+    int r;
+
     if (!bf_program_chain_uses_ct(program))
         return 0;
 
     if (notrack)
         return 0;
 
+    /* Only create an entry for a freshly NEW-classified, non-hairpin packet.
+     * Each guard's scope spans the create call so its jump skips over it; the
+     * CT_CREATE stub re-checks ct_state == NEW internally as a backstop. */
     EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_10,
                               _BF_CT_RUNTIME_OFF(ct_hairpin_skip)));
     {
         _clean_bf_jmpctx_ struct bf_jmpctx skip =
             bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JNE, BPF_REG_1, 0, 0));
 
-        (void)skip;
+        EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_10,
+                                  _BF_CT_RUNTIME_OFF(ct_state)));
+        {
+            _clean_bf_jmpctx_ struct bf_jmpctx not_new = bf_jmpctx_get(
+                program, BPF_JMP_IMM(BPF_JNE, BPF_REG_1, CT_STATE_NEW, 0));
+
+            r = _bf_ct_emit_create(program);
+            if (r)
+                return r;
+        }
     }
 
-    EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_10,
-                              _BF_CT_RUNTIME_OFF(ct_state)));
-    {
-        _clean_bf_jmpctx_ struct bf_jmpctx not_new =
-            bf_jmpctx_get(program,
-                          BPF_JMP_IMM(BPF_JNE, BPF_REG_1, CT_STATE_NEW, 0));
-
-        (void)not_new;
-    }
-
-    return _bf_ct_emit_create(program);
+    return 0;
 }
 
 int bf_ct_emit_tail_call(struct bf_program *program)

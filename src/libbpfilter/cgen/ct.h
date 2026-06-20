@@ -44,7 +44,6 @@ bool bf_program_chain_uses_ct(const struct bf_program *program);
 int bf_ct_emit_prologue(struct bf_program *program);
 int bf_ct_emit_match(struct bf_program *program,
                      const struct bf_matcher *matcher);
-int bf_ct_emit_update_fsm(struct bf_program *program);
 int bf_ct_emit_create_if_new(struct bf_program *program, bool notrack);
 int bf_ct_emit_tail_call(struct bf_program *program);
 int bf_ct_emit_scratch_restore(struct bf_program *program);

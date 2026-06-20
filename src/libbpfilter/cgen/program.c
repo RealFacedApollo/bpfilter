@@ -669,10 +669,6 @@ static int _bf_program_generate_rule(struct bf_program *program,
         EMIT_FIXUP_ELFSTUB(program, BF_ELFSTUB_UPDATE_COUNTERS);
     }
 
-    r = bf_ct_emit_update_fsm(program);
-    if (r)
-        return r;
-
     switch (rule->verdict) {
     case BF_VERDICT_ACCEPT:
         r = bf_ct_emit_create_if_new(program, bf_rule_has_notrack(rule));
