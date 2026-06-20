@@ -549,13 +549,14 @@ int bf_ct_emit_update_fsm(struct bf_program *program)
         _clean_bf_jmpctx_ struct bf_jmpctx hairpin =
             bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JNE, BPF_REG_1, 0, 0));
 
-        EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_10,
-                                  _BF_CT_RUNTIME_OFF(ct_state)));
         {
-            _clean_bf_jmpctx_ struct bf_jmpctx not_new =
-                bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JNE, BPF_REG_1,
-                                                    CT_STATE_NEW, 0));
-
+            /* Advance the protocol FSM for every tracked TCP/SCTP packet, not
+             * only NEW-classified ones. A reply is now classified ESTABLISHED
+             * (see bf_ct_entry_to_rule_state), so the handshake SYN-ACK/ACK are
+             * no longer NEW; gating on NEW here would freeze internal_state at
+             * SYN_SENT and give established flows the short SYN timeout. The
+             * entry lookup below misses until create_if_new inserts the entry,
+             * so running this on the initial SYN is a harmless no-op. */
             {
                 _clean_bf_jmpctx_ struct bf_jmpctx not_tcp =
                     bf_jmpctx_get(program, BPF_JMP_IMM(BPF_JNE, BPF_REG_8,

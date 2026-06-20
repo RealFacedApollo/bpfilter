@@ -19,22 +19,17 @@ bf_ct_entry_to_rule_state(const struct ct_entry *e, bool is_reply)
     if (e->flags & CT_FLAG_RELATED)
         return CT_STATE_RELATED;
 
-    if (e->proto == IPPROTO_TCP) {
-        if (e->internal_state < CT_TCP_ESTABLISHED)
-            return CT_STATE_NEW;
-        if (is_reply)
-            return CT_STATE_ESTABLISHED | CT_STATE_REPLY;
-        return CT_STATE_ESTABLISHED;
-    }
-
-    if (e->proto == IPPROTO_SCTP) {
-        if (e->internal_state < CT_SCTP_ESTABLISHED)
-            return CT_STATE_NEW;
-        if (is_reply)
-            return CT_STATE_ESTABLISHED | CT_STATE_REPLY;
-        return CT_STATE_ESTABLISHED;
-    }
-
+    /* Rule-visible state is derived from whether the flow has been observed in
+     * both directions (seen-reply), not from the protocol FSM — matching
+     * netfilter / Security-Group semantics for every protocol. A reply packet,
+     * or a forward packet on a flow whose reply was already seen, is
+     * ESTABLISHED; a flow seen in only one direction is NEW. This lets a
+     * stateful chain accept the return direction (e.g. a TCP SYN-ACK) via an
+     * "established" rule without opening the port to new connections.
+     *
+     * The TCP/SCTP FSM still runs (see bf_ct_bpf_tcp_fsm / bf_ct_bpf_sctp_fsm)
+     * and still flags RST/INVALID and drives connection timeouts — it simply no
+     * longer gates this classification. */
     if (is_reply)
         return CT_STATE_ESTABLISHED | CT_STATE_REPLY;
 

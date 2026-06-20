@@ -735,7 +735,11 @@ static void _bft_tcp_v6_handshake_steps(struct bft_ct_harness *h)
     synack = _bft_ct_build_tcp_v6(&dst, &src, _htons_u16(443), _htons_u16(44000),
                                   0x12);
     assert_ok(_bft_ct_set_op(h, CT_TEST_OP_LOOKUP_UPDATE_TCP));
-    assert_int_equal(_bft_ct_run(h, synack->data, synack->len), CT_STATE_NEW);
+    /* The SYN-ACK is the reply direction, so the flow is now seen in both
+     * directions and classifies as ESTABLISHED|REPLY (netfilter semantics),
+     * even though the handshake is not yet complete. */
+    assert_int_equal(_bft_ct_run(h, synack->data, synack->len),
+                     CT_STATE_ESTABLISHED | CT_STATE_REPLY);
 
     ack = _bft_ct_build_tcp_v6(&src, &dst, _htons_u16(44000), _htons_u16(443),
                                0x10);
@@ -757,7 +761,11 @@ static void _bft_tcp_handshake_steps(struct bft_ct_harness *h)
     synack = _bft_ct_build_tcp_v4(_ipv4(10, 0, 0, 1), _ipv4(1, 2, 3, 4),
                                  _htons_u16(443), _htons_u16(55000), 0x12);
     assert_ok(_bft_ct_set_op(h, CT_TEST_OP_LOOKUP_UPDATE_TCP));
-    assert_int_equal(_bft_ct_run(h, synack->data, synack->len), CT_STATE_NEW);
+    /* The SYN-ACK is the reply direction, so the flow is now seen in both
+     * directions and classifies as ESTABLISHED|REPLY (netfilter semantics),
+     * even though the handshake is not yet complete. */
+    assert_int_equal(_bft_ct_run(h, synack->data, synack->len),
+                     CT_STATE_ESTABLISHED | CT_STATE_REPLY);
 
     ack = _bft_ct_build_tcp_v4(_ipv4(1, 2, 3, 4), _ipv4(10, 0, 0, 1),
                                _htons_u16(55000), _htons_u16(443), 0x10);
@@ -1213,14 +1221,18 @@ static void lookup_sctp_handshake(void **state)
                                 _htons_u16(5000), _htons_u16(5000),
                                 BF_CT_SCTP_CID_INIT_ACK);
     assert_ok(_bft_ct_set_op(h, CT_TEST_OP_LOOKUP_UPDATE_TCP));
-    assert_int_equal(_bft_ct_run(h, pkt->data, pkt->len), CT_STATE_NEW);
+    /* INIT-ACK is the reply direction: flow now seen both ways. */
+    assert_int_equal(_bft_ct_run(h, pkt->data, pkt->len),
+                     CT_STATE_ESTABLISHED | CT_STATE_REPLY);
 
     _bft_ct_pkt_free(&pkt);
     pkt = _bft_ct_build_sctp_v4(_ipv4(172, 16, 0, 1), _ipv4(172, 16, 0, 2),
                                 _htons_u16(5000), _htons_u16(5000),
                                 BF_CT_SCTP_CID_COOKIE_ECHO);
     assert_ok(_bft_ct_set_op(h, CT_TEST_OP_LOOKUP_UPDATE_TCP));
-    assert_int_equal(_bft_ct_run(h, pkt->data, pkt->len), CT_STATE_NEW);
+    /* Forward packet, but the reply (INIT-ACK) was already seen, so the flow is
+     * established in both directions. */
+    assert_int_equal(_bft_ct_run(h, pkt->data, pkt->len), CT_STATE_ESTABLISHED);
 
     _bft_ct_pkt_free(&pkt);
     pkt = _bft_ct_build_sctp_v4(_ipv4(172, 16, 0, 2), _ipv4(172, 16, 0, 1),
