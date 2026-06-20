@@ -182,11 +182,14 @@ struct bf_runtime
     __u8 ct_is_v6;
     __u8 ct_hairpin_skip;
 
-    /** Pinned host-global CT maps (map FDs as pointers). */
-    struct bf_ct_bpf_maps ct_maps;
-
-    /** Normalized keys populated by @c bf_ct_lookup(). */
-    struct ct_key_v4 ct_key_v4;
+    /** Normalized keys populated by @c bf_ct_lookup().
+     *
+     * @c ct_key_v4 is forced to an 8-byte-aligned offset: the codegen zeroes
+     * and copies the keys with 8-byte stores (see _bf_ct_emit_lookup_call),
+     * which the verifier rejects on a non-8-aligned stack offset. The packed
+     * key structs have alignment 1, so without this the keys would land on a
+     * 4-byte-aligned offset. */
+    struct ct_key_v4 bf_aligned(8) ct_key_v4;
     struct ct_key_v6 ct_key_v6;
 };
 

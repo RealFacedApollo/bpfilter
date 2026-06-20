@@ -124,45 +124,53 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
                                              struct ct_key_v6 *key_v6,
                                              __u8 *is_reply)
 {
-    struct bf_ct_pkt_info pkt = {};
+    struct ct_subprog_scratch *s = bf_ct_bpf_scratch();
+    struct bf_ct_pkt_info *pkt;
     struct ct_entry *entry = NULL;
     __u64 now_ns;
     __u8 orig_lo_is_src = 0;
     __u8 state;
 
-    if (!ctx || bf_ct_bpf_parse_runtime(ctx, &pkt) < 0)
+    if (!ctx || !s)
         return CT_STATE_INVALID;
 
-    if (bf_ct_bpf_is_related_icmp_packet(&pkt))
-        return bf_ct_bpf_lookup_related(ctx, &pkt);
+    /* The parsed packet fields are staged in the per-CPU scratch map rather
+     * than on this subprogram's stack, to keep the combined BPF stack within
+     * budget. */
+    pkt = &s->pkt;
+    if (bf_ct_bpf_parse_runtime(ctx, pkt) < 0)
+        return CT_STATE_INVALID;
+
+    if (bf_ct_bpf_is_related_icmp_packet(pkt))
+        return bf_ct_bpf_lookup_related(ctx, pkt);
 
     now_ns = bpf_ktime_get_ns();
 
-    if (pkt.is_v6) {
-        __u32 src_disc = pkt.sport;
-        __u32 dst_disc = pkt.dport;
+    if (pkt->is_v6) {
+        __u32 src_disc = pkt->sport;
+        __u32 dst_disc = pkt->dport;
 
-        if (pkt.proto == IPPROTO_ICMPV6)
-            src_disc = pkt.icmp_id;
-        else if (pkt.proto == IPPROTO_ESP || pkt.proto == IPPROTO_AH)
-            src_disc = pkt.spi;
-        else if (pkt.proto == IPPROTO_GRE)
-            src_disc = pkt.gre_key;
+        if (pkt->proto == IPPROTO_ICMPV6)
+            src_disc = pkt->icmp_id;
+        else if (pkt->proto == IPPROTO_ESP || pkt->proto == IPPROTO_AH)
+            src_disc = pkt->spi;
+        else if (pkt->proto == IPPROTO_GRE)
+            src_disc = pkt->gre_key;
 
         struct in6_addr lo;
         struct in6_addr hi;
 
-        bf_ct_bpf_key_normalize_v6(&pkt.src_v6, &pkt.dst_v6, src_disc,
-                                   dst_disc, pkt.proto, key_v6,
+        bf_ct_bpf_key_normalize_v6(&pkt->src_v6, &pkt->dst_v6, src_disc,
+                                   dst_disc, pkt->proto, key_v6,
                                    &orig_lo_is_src);
         lo = key_v6->lo_ip;
         hi = key_v6->hi_ip;
-        *is_reply = bf_ct_bpf_is_reply_v6(&pkt.src_v6, orig_lo_is_src, &lo,
+        *is_reply = bf_ct_bpf_is_reply_v6(&pkt->src_v6, orig_lo_is_src, &lo,
                                           &hi);
 
-        entry = bf_ct_bpf_lookup_entry_v6(key_v6, pkt.proto, pkt.spi);
+        entry = bf_ct_bpf_lookup_entry_v6(key_v6, pkt->proto, pkt->spi);
         if (!entry) {
-            if (bf_ct_bpf_tcp_unsolicited_ack(&pkt)) {
+            if (bf_ct_bpf_tcp_unsolicited_ack(pkt)) {
                 bf_ct_bpf_stats_invalid((void *)&bf_ct_map_stats);
                 return CT_STATE_INVALID;
             }
@@ -175,7 +183,7 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
             __be32 lo_ip;
             __be32 hi_ip;
 
-            *is_reply = bf_ct_bpf_is_reply_v6(&pkt.src_v6,
+            *is_reply = bf_ct_bpf_is_reply_v6(&pkt->src_v6,
                                               entry->orig_lo_is_src, &lo6,
                                               &hi6);
             __builtin_memcpy(&lo_ip, &key_v6->lo_ip.s6_addr[12],
@@ -185,44 +193,44 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
             state = bf_ct_bpf_lookup_hit(entry, *is_reply, now_ns, ctx->pkt_size,
                                          (void *)&bf_ct_map_stats,
                                          (void *)&bf_ct_map_spi_reverse, lo_ip,
-                                         hi_ip, pkt.proto, pkt.spi);
+                                         hi_ip, pkt->proto, pkt->spi);
         }
         key_v4->proto = 0;
         return state;
     }
 
     {
-        __u32 src_disc = pkt.sport;
-        __u32 dst_disc = pkt.dport;
+        __u32 src_disc = pkt->sport;
+        __u32 dst_disc = pkt->dport;
 
-        if (pkt.proto == IPPROTO_ICMP)
-            src_disc = pkt.icmp_id;
-        else if (pkt.proto == IPPROTO_ESP || pkt.proto == IPPROTO_AH)
-            src_disc = pkt.spi;
-        else if (pkt.proto == IPPROTO_GRE)
-            src_disc = pkt.gre_key;
+        if (pkt->proto == IPPROTO_ICMP)
+            src_disc = pkt->icmp_id;
+        else if (pkt->proto == IPPROTO_ESP || pkt->proto == IPPROTO_AH)
+            src_disc = pkt->spi;
+        else if (pkt->proto == IPPROTO_GRE)
+            src_disc = pkt->gre_key;
 
-        bf_ct_bpf_key_normalize_v4(pkt.src_v4, pkt.dst_v4, src_disc, dst_disc,
-                                   pkt.proto, key_v4, &orig_lo_is_src);
-        *is_reply = bf_ct_bpf_is_reply_v4(pkt.src_v4, orig_lo_is_src,
+        bf_ct_bpf_key_normalize_v4(pkt->src_v4, pkt->dst_v4, src_disc, dst_disc,
+                                   pkt->proto, key_v4, &orig_lo_is_src);
+        *is_reply = bf_ct_bpf_is_reply_v4(pkt->src_v4, orig_lo_is_src,
                                           key_v4->lo_ip, key_v4->hi_ip);
 
-        entry = bf_ct_bpf_lookup_entry_v4(key_v4, pkt.proto, pkt.spi);
+        entry = bf_ct_bpf_lookup_entry_v4(key_v4, pkt->proto, pkt->spi);
         if (!entry) {
-            if (bf_ct_bpf_tcp_unsolicited_ack(&pkt)) {
+            if (bf_ct_bpf_tcp_unsolicited_ack(pkt)) {
                 bf_ct_bpf_stats_invalid((void *)&bf_ct_map_stats);
                 return CT_STATE_INVALID;
             }
             return CT_STATE_NEW;
         }
 
-        *is_reply = bf_ct_bpf_is_reply_v4(pkt.src_v4, entry->orig_lo_is_src,
+        *is_reply = bf_ct_bpf_is_reply_v4(pkt->src_v4, entry->orig_lo_is_src,
                                           key_v4->lo_ip, key_v4->hi_ip);
         state = bf_ct_bpf_lookup_hit(entry, *is_reply, now_ns, ctx->pkt_size,
                                      (void *)&bf_ct_map_stats,
                                      (void *)&bf_ct_map_spi_reverse,
-                                     key_v4->lo_ip, key_v4->hi_ip, pkt.proto,
-                                     pkt.spi);
+                                     key_v4->lo_ip, key_v4->hi_ip, pkt->proto,
+                                     pkt->spi);
         key_v6->proto = 0;
         return state;
     }

@@ -284,6 +284,10 @@ static int _bf_ct_map_create(struct bf_ct_map *map, int ct_dir_fd, bool *created
     case BF_CT_MAP_META:
         btf = _bf_ct_make_array_btf("ct_meta", sizeof(struct ct_meta));
         break;
+    case BF_CT_MAP_SUBPROG_SCRATCH:
+        btf = _bf_ct_make_array_btf("ct_subprog_scratch",
+                                    sizeof(struct ct_subprog_scratch));
+        break;
     default:
         return bf_err_r(-EINVAL, "unknown conntrack map id %d", map->id);
     }
@@ -400,6 +404,10 @@ static int _bf_ct_maps_fill_defs(struct bf_ct_maps *maps,
     _bf_ct_map_init_def(&maps->maps[BF_CT_MAP_META], BF_CT_MAP_META,
                         BF_BPF_MAP_TYPE_ARRAY, "ct_meta", sizeof(__u32),
                         sizeof(struct ct_meta), 1);
+    _bf_ct_map_init_def(&maps->maps[BF_CT_MAP_SUBPROG_SCRATCH],
+                        BF_CT_MAP_SUBPROG_SCRATCH,
+                        BF_BPF_MAP_TYPE_PERCPU_ARRAY, "ct_subprog_scratch",
+                        sizeof(__u32), sizeof(struct ct_subprog_scratch), 1);
 
     return 0;
 }
@@ -596,6 +604,7 @@ int bf_ct_map_id_from_sym(const char *name)
         {"bf_ct_map_src_count", BF_CT_MAP_SRC_COUNT},
         {"bf_ct_map_spi_reverse", BF_CT_MAP_SPI_REVERSE},
         {"bf_ct_map_stats", BF_CT_MAP_STATS},
+        {"bf_ct_map_subprog_scratch", BF_CT_MAP_SUBPROG_SCRATCH},
     };
 
     assert(name);

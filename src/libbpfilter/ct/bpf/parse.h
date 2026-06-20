@@ -77,26 +77,8 @@ static __always_inline __u32 bf_ct_bpf_parse_gre_key(const struct bf_runtime *ct
     return bpf_ntohl(*(__u32 *)(l4 + sizeof(*gre)));
 }
 
-struct bf_ct_pkt_info
-{
-    __u8 is_v6;
-    __u8 proto;
-    __u16 sport;
-    __u16 dport;
-    __u8 icmp_type;
-    __u16 icmp_id;
-    __u32 spi;
-    __u32 gre_key;
-    __u8 sctp_chunk;
-    __be32 src_v4;
-    __be32 dst_v4;
-    struct in6_addr src_v6;
-    struct in6_addr dst_v6;
-    const struct tcphdr *tcp;
-    const struct udphdr *udp;
-    const struct icmphdr *icmp;
-    const struct icmp6hdr *icmp6;
-};
+/* struct bf_ct_pkt_info is defined in <bpfilter/ct.h>: it is staged in the
+ * per-CPU ct_subprog_scratch map and must stay pointer-free. */
 
 static __always_inline bool bf_ct_bpf_is_icmp_error(__u8 type)
 {
@@ -166,22 +148,34 @@ static __always_inline int bf_ct_bpf_parse_runtime(const struct bf_runtime *ctx,
         if (!l4)
             return 0;
 
+        pkt->has_l4 = 1;
+
         switch (pkt->proto) {
-        case IPPROTO_TCP:
-            pkt->tcp = l4;
-            pkt->sport = bpf_ntohs(pkt->tcp->source);
-            pkt->dport = bpf_ntohs(pkt->tcp->dest);
+        case IPPROTO_TCP: {
+            const struct tcphdr *tcp = l4;
+
+            pkt->sport = bpf_ntohs(tcp->source);
+            pkt->dport = bpf_ntohs(tcp->dest);
+            pkt->tcp_syn = tcp->syn;
+            pkt->tcp_ack = tcp->ack;
+            pkt->tcp_rst = tcp->rst;
+            pkt->tcp_fin = tcp->fin;
             break;
-        case IPPROTO_UDP:
-            pkt->udp = l4;
-            pkt->sport = bpf_ntohs(pkt->udp->source);
-            pkt->dport = bpf_ntohs(pkt->udp->dest);
+        }
+        case IPPROTO_UDP: {
+            const struct udphdr *udp = l4;
+
+            pkt->sport = bpf_ntohs(udp->source);
+            pkt->dport = bpf_ntohs(udp->dest);
             break;
-        case IPPROTO_ICMP:
-            pkt->icmp = l4;
-            pkt->icmp_type = pkt->icmp->type;
-            pkt->icmp_id = bpf_ntohs(pkt->icmp->un.echo.id);
+        }
+        case IPPROTO_ICMP: {
+            const struct icmphdr *icmp = l4;
+
+            pkt->icmp_type = icmp->type;
+            pkt->icmp_id = bpf_ntohs(icmp->un.echo.id);
             break;
+        }
         case IPPROTO_SCTP:
             pkt->sctp_chunk = bf_ct_bpf_parse_sctp_chunk(ctx);
             if (ctx->l4_size >= 4) {
@@ -221,22 +215,34 @@ static __always_inline int bf_ct_bpf_parse_runtime(const struct bf_runtime *ctx,
     if (!l4)
         return 0;
 
+    pkt->has_l4 = 1;
+
     switch (pkt->proto) {
-    case IPPROTO_TCP:
-        pkt->tcp = l4;
-        pkt->sport = bpf_ntohs(pkt->tcp->source);
-        pkt->dport = bpf_ntohs(pkt->tcp->dest);
+    case IPPROTO_TCP: {
+        const struct tcphdr *tcp = l4;
+
+        pkt->sport = bpf_ntohs(tcp->source);
+        pkt->dport = bpf_ntohs(tcp->dest);
+        pkt->tcp_syn = tcp->syn;
+        pkt->tcp_ack = tcp->ack;
+        pkt->tcp_rst = tcp->rst;
+        pkt->tcp_fin = tcp->fin;
         break;
-    case IPPROTO_UDP:
-        pkt->udp = l4;
-        pkt->sport = bpf_ntohs(pkt->udp->source);
-        pkt->dport = bpf_ntohs(pkt->udp->dest);
+    }
+    case IPPROTO_UDP: {
+        const struct udphdr *udp = l4;
+
+        pkt->sport = bpf_ntohs(udp->source);
+        pkt->dport = bpf_ntohs(udp->dest);
         break;
-    case IPPROTO_ICMPV6:
-        pkt->icmp6 = l4;
-        pkt->icmp_type = pkt->icmp6->icmp6_type;
-        pkt->icmp_id = bpf_ntohs(pkt->icmp6->icmp6_identifier);
+    }
+    case IPPROTO_ICMPV6: {
+        const struct icmp6hdr *icmp6 = l4;
+
+        pkt->icmp_type = icmp6->icmp6_type;
+        pkt->icmp_id = bpf_ntohs(icmp6->icmp6_identifier);
         break;
+    }
     case IPPROTO_SCTP:
         pkt->sctp_chunk = bf_ct_bpf_parse_sctp_chunk(ctx);
         if (ctx->l4_size >= 4) {
@@ -273,8 +279,8 @@ bf_ct_bpf_is_related_icmp_packet(const struct bf_ct_pkt_info *pkt)
 static __always_inline bool
 bf_ct_bpf_tcp_unsolicited_ack(const struct bf_ct_pkt_info *pkt)
 {
-    if (!pkt->tcp || pkt->proto != IPPROTO_TCP)
+    if (!pkt->has_l4 || pkt->proto != IPPROTO_TCP)
         return false;
 
-    return pkt->tcp->ack && !pkt->tcp->syn && !pkt->tcp->rst && !pkt->tcp->fin;
+    return pkt->tcp_ack && !pkt->tcp_syn && !pkt->tcp_rst && !pkt->tcp_fin;
 }

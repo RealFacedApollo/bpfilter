@@ -34,55 +34,6 @@ static int _bf_ct_emit_runtime_reg(struct bf_program *program, int reg)
     return 0;
 }
 
-static int _bf_ct_emit_store_map_ptr(struct bf_program *program, int reg,
-                                     enum bf_ct_map_id map_id, int field_off)
-{
-    EMIT_LOAD_CT_MAP_FD_FIXUP(program, reg, map_id);
-    /* Spill the map pointer with a direct r10-relative store. An indirect
-     * store (through a computed pointer) is not tracked as a typed spill, so
-     * the map type is lost and a later bpf_map_lookup_elem() sees a scalar. */
-    EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, reg, field_off));
-
-    return 0;
-}
-
-static int _bf_ct_emit_populate_maps(struct bf_program *program)
-{
-    int r;
-
-    r = _bf_ct_emit_store_map_ptr(program, BPF_REG_1, BF_CT_MAP_TCP,
-                                  _BF_CT_RUNTIME_OFF(ct_maps.tcp));
-    if (r)
-        return r;
-    r = _bf_ct_emit_store_map_ptr(program, BPF_REG_1, BF_CT_MAP_TCP6,
-                                  _BF_CT_RUNTIME_OFF(ct_maps.tcp6));
-    if (r)
-        return r;
-    r = _bf_ct_emit_store_map_ptr(program, BPF_REG_1, BF_CT_MAP_ANY,
-                                  _BF_CT_RUNTIME_OFF(ct_maps.any));
-    if (r)
-        return r;
-    r = _bf_ct_emit_store_map_ptr(program, BPF_REG_1, BF_CT_MAP_ANY6,
-                                  _BF_CT_RUNTIME_OFF(ct_maps.any6));
-    if (r)
-        return r;
-    r = _bf_ct_emit_store_map_ptr(program, BPF_REG_1, BF_CT_MAP_SRC_RATE,
-                                  _BF_CT_RUNTIME_OFF(ct_maps.src_rate));
-    if (r)
-        return r;
-    r = _bf_ct_emit_store_map_ptr(program, BPF_REG_1, BF_CT_MAP_SRC_COUNT,
-                                  _BF_CT_RUNTIME_OFF(ct_maps.src_count));
-    if (r)
-        return r;
-    r = _bf_ct_emit_store_map_ptr(program, BPF_REG_1, BF_CT_MAP_SPI_REVERSE,
-                                  _BF_CT_RUNTIME_OFF(ct_maps.spi_reverse));
-    if (r)
-        return r;
-
-    return _bf_ct_emit_store_map_ptr(program, BPF_REG_1, BF_CT_MAP_STATS,
-                                     _BF_CT_RUNTIME_OFF(ct_maps.stats));
-}
-
 static bool _bf_ct_hook_has_skb(enum bf_hook hook)
 {
     switch (hook) {
@@ -191,25 +142,23 @@ static int _bf_ct_emit_lookup_call(struct bf_program *program)
     EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10, _BF_CT_RUNTIME_OFF(ct_key_v6.proto),
                              0));
 
-    EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10, BF_PROG_SCR_OFF(0), 0));
+    /* Build struct bf_ct_lookup_args in the scratch area: key_v4 (offset 0),
+     * key_v6 (offset 8), is_reply (offset 16). The CT maps are referenced as
+     * relocatable globals inside the stub, so no map pointer is passed. */
     EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
-    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, _BF_CT_RUNTIME_OFF(ct_maps)));
+    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1,
+                                _BF_CT_RUNTIME_OFF(ct_key_v4)));
     EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(0)));
 
     EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
     EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1,
-                                _BF_CT_RUNTIME_OFF(ct_key_v4)));
+                                _BF_CT_RUNTIME_OFF(ct_key_v6)));
     EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(8)));
 
     EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
     EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1,
-                                _BF_CT_RUNTIME_OFF(ct_key_v6)));
-    EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(16)));
-
-    EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
-    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1,
                                 _BF_CT_RUNTIME_OFF(ct_is_reply)));
-    EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(24)));
+    EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(16)));
 
     _bf_ct_emit_runtime_reg(program, BPF_REG_1);
     EMIT(program, BPF_MOV64_REG(BPF_REG_2, BPF_REG_10));
@@ -309,11 +258,7 @@ static int _bf_ct_emit_scratch_apply(struct bf_program *program, int src_reg)
             return r;
     }
 
-    r = _bf_ct_emit_copy_key_v4(program, src_reg);
-    if (r)
-        return r;
-
-    return _bf_ct_emit_populate_maps(program);
+    return _bf_ct_emit_copy_key_v4(program, src_reg);
 }
 
 bool bf_program_chain_uses_ct(const struct bf_program *program)
@@ -328,8 +273,6 @@ bool bf_program_chain_uses_ct(const struct bf_program *program)
 
 int bf_ct_emit_scratch_restore(struct bf_program *program)
 {
-    int r;
-
     if (!bf_program_chain_uses_ct(program))
         return 0;
 
@@ -359,10 +302,6 @@ int bf_ct_emit_scratch_restore(struct bf_program *program)
             return _bf_ct_emit_scratch_apply(program, BPF_REG_0);
         }
     }
-
-    r = _bf_ct_emit_populate_maps(program);
-    if (r)
-        return r;
 
     return _bf_ct_emit_lookup_call(program);
 }
@@ -465,10 +404,6 @@ int bf_ct_emit_prologue(struct bf_program *program)
                 if (r)
                     return r;
             } else {
-                r = _bf_ct_emit_populate_maps(program);
-                if (r)
-                    return r;
-
                 r = _bf_ct_emit_lookup_call(program);
                 if (r)
                     return r;
@@ -488,10 +423,6 @@ int bf_ct_emit_prologue(struct bf_program *program)
 
     if (program->ctgen.segment_idx > 0)
         return bf_ct_emit_scratch_restore(program);
-
-    r = _bf_ct_emit_populate_maps(program);
-    if (r)
-        return r;
 
     return _bf_ct_emit_lookup_call(program);
 }
@@ -673,28 +604,25 @@ int bf_ct_emit_update_fsm(struct bf_program *program)
 
 static int _bf_ct_emit_create(struct bf_program *program)
 {
-    EMIT(program, BPF_ST_MEM(BPF_W, BPF_REG_10, BF_PROG_SCR_OFF(0), 0));
+    /* Build struct bf_ct_create_args in the scratch area: key_v4 (offset 0),
+     * key_v6 (offset 8), ct_state (offset 16), is_v6 (offset 17). */
     EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
-    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, _BF_CT_RUNTIME_OFF(ct_maps)));
+    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1,
+                                _BF_CT_RUNTIME_OFF(ct_key_v4)));
     EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(0)));
 
     EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
     EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1,
-                                _BF_CT_RUNTIME_OFF(ct_key_v4)));
-    EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(8)));
-
-    EMIT(program, BPF_MOV64_REG(BPF_REG_1, BPF_REG_10));
-    EMIT(program, BPF_ALU64_IMM(BPF_ADD, BPF_REG_1,
                                 _BF_CT_RUNTIME_OFF(ct_key_v6)));
-    EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(16)));
+    EMIT(program, BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(8)));
 
     EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_10,
                               _BF_CT_RUNTIME_OFF(ct_state)));
-    EMIT(program, BPF_STX_MEM(BPF_B, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(24)));
+    EMIT(program, BPF_STX_MEM(BPF_B, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(16)));
 
     EMIT(program, BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_10,
                               _BF_CT_RUNTIME_OFF(ct_is_v6)));
-    EMIT(program, BPF_STX_MEM(BPF_B, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(25)));
+    EMIT(program, BPF_STX_MEM(BPF_B, BPF_REG_10, BPF_REG_1, BF_PROG_SCR_OFF(17)));
 
     _bf_ct_emit_runtime_reg(program, BPF_REG_1);
     EMIT(program, BPF_MOV64_REG(BPF_REG_2, BPF_REG_10));

@@ -16,7 +16,6 @@ __u8 bf_ct_lookup(struct bf_runtime *ctx, struct bf_ct_lookup_args *args)
      * ct/bpf/maps.h): each bpf_map_lookup_elem() operand is a BPF_LD_MAP_FD
      * constant the elfstub loader patches with the real pinned map fd. No map
      * pointer is carried through the runtime struct or this frame's stack, so
-     * the verifier keeps the map type across the subprogram's helper calls.
-     * args->maps is unused (the create stub still uses the struct path). */
+     * the verifier keeps the map type across the subprogram's helper calls. */
     return bf_ct_bpf_lookup(ctx, args->key_v4, args->key_v6, args->is_reply);
 }

@@ -202,6 +202,54 @@ struct ct_spi_reverse_key
 } __attribute__((packed));
 
 /**
+ * Parsed packet fields shared by the conntrack BPF subprograms.
+ *
+ * @warning This struct is staged in the per-CPU @ref ct_subprog_scratch map, so
+ *          it must remain free of pointer fields: the BPF verifier rejects
+ *          storing a packet/stack/map pointer into map-value memory. Transport
+ *          header data needed after parsing (e.g. the TCP flags) is copied into
+ *          scalar fields here instead of keeping the header pointer.
+ */
+struct bf_ct_pkt_info
+{
+    __u8 is_v6;
+    __u8 proto;
+    __u16 sport;
+    __u16 dport;
+    __u8 icmp_type;
+    __u16 icmp_id;
+    __u32 spi;
+    __u32 gre_key;
+    __u8 sctp_chunk;
+    /** Non-zero once an L4 header has been parsed for this packet. */
+    __u8 has_l4;
+    /** TCP flag bits, valid when @c proto is TCP and @c has_l4 is set. */
+    __u8 tcp_syn;
+    __u8 tcp_ack;
+    __u8 tcp_rst;
+    __u8 tcp_fin;
+    __be32 src_v4;
+    __be32 dst_v4;
+    struct in6_addr src_v6;
+    struct in6_addr dst_v6;
+};
+
+/**
+ * Per-CPU scratch for the conntrack BPF subprograms (§10.5).
+ *
+ * The CT lookup/create stubs run as BPF-to-BPF subprograms, whose stack frame
+ * stacks on top of the calling program's. To stay within the 512-byte combined
+ * stack budget, their largest working structures live here, in a host-global
+ * single-entry per-CPU array, instead of on the subprogram stack. Only one CT
+ * subprogram runs per packet on a given CPU, so a single slot is sufficient.
+ */
+struct ct_subprog_scratch
+{
+    struct bf_ct_pkt_info pkt;
+    struct ct_entry entry;
+};
+
+/**
  * Per-CPU scratch for conntrack state across tail-call segments (§10.5).
  */
 struct ct_tail_scratch
@@ -234,26 +282,13 @@ struct ct_meta
 #define BF_CT_CB_PROCESSED 0x5au
 
 /**
- * Map file descriptors passed to BPF conntrack stubs.
+ * Arguments for @c bf_ct_lookup() — keeps the stub within five BPF registers.
  *
- * Each field is a map pointer valid in the BPF program context.
+ * @note The CT maps are referenced by the stubs as host-global relocatable
+ *       globals (see ct/bpf/maps.h), so no map pointer is passed here.
  */
-struct bf_ct_bpf_maps
-{
-    void *tcp;
-    void *tcp6;
-    void *any;
-    void *any6;
-    void *src_rate;
-    void *src_count;
-    void *spi_reverse;
-    void *stats;
-};
-
-/** Arguments for @c bf_ct_lookup() — keeps the stub within five BPF registers. */
 struct bf_ct_lookup_args
 {
-    struct bf_ct_bpf_maps *maps;
     struct ct_key_v4 *key_v4;
     struct ct_key_v6 *key_v6;
     __u8 *is_reply;
@@ -262,7 +297,6 @@ struct bf_ct_lookup_args
 /** Arguments for @c bf_ct_create_if_new(). */
 struct bf_ct_create_args
 {
-    struct bf_ct_bpf_maps *maps;
     struct ct_key_v4 *key_v4;
     struct ct_key_v6 *key_v6;
     __u8 ct_state;
@@ -283,6 +317,7 @@ enum bf_ct_map_id
     BF_CT_MAP_STATS,
     BF_CT_MAP_TAIL_SCRATCH,
     BF_CT_MAP_META,
+    BF_CT_MAP_SUBPROG_SCRATCH,
 
     _BF_CT_MAP_MAX,
 };

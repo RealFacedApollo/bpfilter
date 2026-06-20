@@ -103,6 +103,31 @@ struct
     __type(value, struct ct_stats_counters);
 } bf_ct_map_stats SEC(".maps");
 
+struct
+{
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct ct_subprog_scratch);
+} bf_ct_map_subprog_scratch SEC(".maps");
+
+/**
+ * @brief Return this CPU's conntrack subprogram scratch slot.
+ *
+ * The CT subprograms stage their largest working structures here instead of on
+ * the stack (see @ref ct_subprog_scratch). The single-entry per-CPU array
+ * lookup at index 0 never fails at runtime, but the verifier still requires the
+ * NULL check at the call site.
+ *
+ * @return Pointer to the per-CPU scratch slot, or NULL.
+ */
+static __always_inline struct ct_subprog_scratch *bf_ct_bpf_scratch(void)
+{
+    __u32 zero = 0;
+
+    return bpf_map_lookup_elem((void *)&bf_ct_map_subprog_scratch, &zero);
+}
+
 /**
  * @brief Select the flow-table map for a packet, by relocation.
  *

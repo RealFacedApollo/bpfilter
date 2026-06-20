@@ -24,8 +24,7 @@
 #include "ct/bpf/stats.h"
 
 static __always_inline __u8
-bf_ct_bpf_lookup_related_v4(const struct bf_runtime *ctx,
-                            const struct icmphdr *icmp)
+bf_ct_bpf_lookup_related_v4(const struct bf_runtime *ctx)
 {
     const struct iphdr *inner_ip;
     struct ct_key_v4 inner_key = {};
@@ -40,10 +39,10 @@ bf_ct_bpf_lookup_related_v4(const struct bf_runtime *ctx,
     __u8 orig_lo_is_src;
 
     l4 = bf_ct_bpf_l4(ctx);
-    if (!l4 || ctx->l4_size < sizeof(*icmp) + sizeof(struct iphdr))
+    if (!l4 || ctx->l4_size < sizeof(struct icmphdr) + sizeof(struct iphdr))
         return CT_STATE_INVALID;
 
-    inner_off = sizeof(*icmp);
+    inner_off = sizeof(struct icmphdr);
     inner_ip = (const struct iphdr *)(l4 + inner_off);
 
     inner_ihl = ((__u32)inner_ip->ihl) * 4;
@@ -81,8 +80,7 @@ bf_ct_bpf_lookup_related_v4(const struct bf_runtime *ctx,
 }
 
 static __always_inline __u8
-bf_ct_bpf_lookup_related_v6(const struct bf_runtime *ctx,
-                            const struct icmp6hdr *icmp6)
+bf_ct_bpf_lookup_related_v6(const struct bf_runtime *ctx)
 {
     const struct ipv6hdr *inner_ip;
     struct ct_key_v6 inner_key = {};
@@ -96,10 +94,10 @@ bf_ct_bpf_lookup_related_v6(const struct bf_runtime *ctx,
     __u8 orig_lo_is_src;
 
     l4 = bf_ct_bpf_l4(ctx);
-    if (!l4 || ctx->l4_size < sizeof(*icmp6) + sizeof(struct ipv6hdr) + 8)
+    if (!l4 || ctx->l4_size < sizeof(struct icmp6hdr) + sizeof(struct ipv6hdr) + 8)
         return CT_STATE_INVALID;
 
-    inner_off = sizeof(*icmp6);
+    inner_off = sizeof(struct icmp6hdr);
     inner_ip = (const struct ipv6hdr *)(l4 + inner_off);
 
     __builtin_memcpy(inner_transport, l4 + inner_off + sizeof(*inner_ip), 8);
@@ -135,10 +133,10 @@ bf_ct_bpf_lookup_related(const struct bf_runtime *ctx,
                          const struct bf_ct_pkt_info *pkt)
 {
 #ifdef BF_CT_BPF_HARNESS
-    if (!pkt->is_v6 && pkt->proto == IPPROTO_ICMP && pkt->icmp)
-        return bf_ct_bpf_lookup_related_v4(ctx, pkt->icmp);
-    if (pkt->is_v6 && pkt->proto == IPPROTO_ICMPV6 && pkt->icmp6)
-        return bf_ct_bpf_lookup_related_v6(ctx, pkt->icmp6);
+    if (!pkt->is_v6 && pkt->proto == IPPROTO_ICMP && pkt->has_l4)
+        return bf_ct_bpf_lookup_related_v4(ctx);
+    if (pkt->is_v6 && pkt->proto == IPPROTO_ICMPV6 && pkt->has_l4)
+        return bf_ct_bpf_lookup_related_v6(ctx);
     return CT_STATE_INVALID;
 #else
     /* ICMP-error "related" tracking is disabled in the real datapath. It must

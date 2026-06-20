@@ -223,10 +223,14 @@ int ct_harness(struct __sk_buff *skb)
         entry = is_v6 ? bpf_map_lookup_elem(flow_map, &key_v6)
                       : bpf_map_lookup_elem(flow_map, &key_v4);
         if (entry) {
-            if (pkt.tcp)
-                bf_ct_bpf_tcp_fsm(entry, pkt.tcp, is_reply);
-            else if (pkt.proto == IPPROTO_SCTP)
+            if (pkt.proto == IPPROTO_TCP && pkt.has_l4) {
+                const struct tcphdr *tcp = bf_ct_bpf_l4(ctx);
+
+                if (tcp)
+                    bf_ct_bpf_tcp_fsm(entry, tcp, is_reply);
+            } else if (pkt.proto == IPPROTO_SCTP) {
                 bf_ct_bpf_sctp_fsm(entry, pkt.sctp_chunk, is_reply);
+            }
             state = bf_ct_entry_to_rule_state(entry, is_reply);
         }
     }
