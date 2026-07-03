@@ -5,22 +5,25 @@
 
 #pragma once
 
-#include <bpfilter/ct.h>
-
+#include <linux/icmp.h>
+#include <linux/icmpv6.h>
 #include <linux/if_ether.h>
+#include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/tcp.h>
-#include <linux/udp.h>
-#include <linux/icmp.h>
-#include <linux/icmpv6.h>
 #include <linux/types.h>
+#include <linux/udp.h>
 
 #include <bpf/bpf_endian.h>
 
+#include <bpfilter/ct.h>
+
 #include "cgen/runtime.h"
 
+#define BF_CT_GRE_CSUM 0x8000
 #define BF_CT_GRE_KEY 0x2000
+#define BF_CT_GRE_VERSION 0x0007
 
 struct bf_ct_gre_hdr
 {
@@ -61,6 +64,7 @@ static __always_inline __u32 bf_ct_bpf_parse_gre_key(const struct bf_runtime *ct
 {
     const struct bf_ct_gre_hdr *gre;
     const void *l4 = bf_ct_bpf_l4(ctx);
+    __u32 key_off = sizeof(*gre);
     __u32 flags;
 
     if (!l4 || ctx->l4_size < sizeof(*gre))
@@ -68,13 +72,24 @@ static __always_inline __u32 bf_ct_bpf_parse_gre_key(const struct bf_runtime *ct
 
     gre = l4;
     flags = bpf_ntohs(gre->flags);
+
+    /* GREv1 (PPTP) has a different optional-field layout; only version 0
+     * (RFC 2890) is keyed. */
+    if (flags & BF_CT_GRE_VERSION)
+        return 0;
+
     if (!(flags & BF_CT_GRE_KEY))
         return 0;
 
-    if (ctx->l4_size < sizeof(*gre) + 4)
+    /* Per RFC 2890 the optional fields are ordered Checksum, Key, Sequence:
+     * a present checksum shifts the key by 4 bytes. */
+    if (flags & BF_CT_GRE_CSUM)
+        key_off += 4;
+
+    if (ctx->l4_size < key_off + 4)
         return 0;
 
-    return bpf_ntohl(*(__u32 *)(l4 + sizeof(*gre)));
+    return bpf_ntohl(*(__u32 *)(l4 + key_off));
 }
 
 /* struct bf_ct_pkt_info is defined in <bpfilter/ct.h>: it is staged in the
@@ -107,14 +122,20 @@ bf_ct_bpf_parse_sctp_chunk(const struct bf_runtime *ctx)
     return chunk;
 }
 
-static __always_inline __u32 bf_ct_bpf_parse_esp_spi(const struct bf_runtime *ctx)
+/* ESP (RFC 4303) carries the SPI at offset 0. AH (RFC 4302) leads with
+ * next_hdr, payload_len and a reserved field, so its SPI sits at offset 4 —
+ * reading offset 0 would key every AH SA between a host pair on the same
+ * near-constant bytes. */
+static __always_inline __u32
+bf_ct_bpf_parse_ipsec_spi(const struct bf_runtime *ctx, __u8 proto)
 {
     const void *l4 = bf_ct_bpf_l4(ctx);
+    __u32 off = proto == IPPROTO_AH ? 4 : 0;
 
-    if (!l4 || ctx->l4_size < 4)
+    if (!l4 || ctx->l4_size < off + 4)
         return 0;
 
-    return bpf_ntohl(*(__u32 *)l4);
+    return bpf_ntohl(*(__u32 *)(l4 + off));
 }
 
 static __always_inline int bf_ct_bpf_parse_runtime(const struct bf_runtime *ctx,
@@ -187,7 +208,7 @@ static __always_inline int bf_ct_bpf_parse_runtime(const struct bf_runtime *ctx,
             break;
         case IPPROTO_ESP:
         case IPPROTO_AH:
-            pkt->spi = bf_ct_bpf_parse_esp_spi(ctx);
+            pkt->spi = bf_ct_bpf_parse_ipsec_spi(ctx, pkt->proto);
             break;
         case IPPROTO_GRE:
             pkt->gre_key = bf_ct_bpf_parse_gre_key(ctx);
@@ -254,7 +275,7 @@ static __always_inline int bf_ct_bpf_parse_runtime(const struct bf_runtime *ctx,
         break;
     case IPPROTO_ESP:
     case IPPROTO_AH:
-        pkt->spi = bf_ct_bpf_parse_esp_spi(ctx);
+        pkt->spi = bf_ct_bpf_parse_ipsec_spi(ctx, pkt->proto);
         break;
     case IPPROTO_GRE:
         pkt->gre_key = bf_ct_bpf_parse_gre_key(ctx);

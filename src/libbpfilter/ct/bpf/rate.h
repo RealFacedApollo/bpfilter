@@ -87,6 +87,19 @@ bf_ct_bpf_src_count_check(void *src_count_map, const struct ct_ip_key *key,
     return entry->count >= limit;
 }
 
+static __always_inline void bf_ct_bpf_src_count_dec(void *src_count_map,
+                                                    const struct ct_ip_key *key)
+{
+    struct ct_src_count_entry *entry;
+
+    entry = bpf_map_lookup_elem(src_count_map, key);
+    if (!entry)
+        return;
+
+    if (entry->count)
+        entry->count -= 1;
+}
+
 static __always_inline void
 bf_ct_bpf_src_count_inc(void *src_count_map, const struct ct_ip_key *key,
                         struct ct_src_count_entry *fresh)

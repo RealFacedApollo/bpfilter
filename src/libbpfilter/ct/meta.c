@@ -62,6 +62,34 @@ int bf_ct_meta_set_last_sweep_ns(const struct bf_ct_maps *maps, __u64 ns)
     return 0;
 }
 
+int bf_ct_meta_add_gc_stats(const struct bf_ct_maps *maps, __u64 phase1,
+                            __u64 phase2)
+{
+    struct ct_meta meta;
+    __u32 key = 0;
+    int fd;
+    int r;
+
+    assert(maps);
+
+    fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_META);
+    if (fd < 0)
+        return fd;
+
+    r = bf_ct_meta_get(&meta, maps);
+    if (r)
+        return r;
+
+    meta.gc_phase1_marked += phase1;
+    meta.gc_phase2_deleted += phase2;
+
+    r = bf_bpf_map_update_elem(fd, &key, &meta, BPF_ANY);
+    if (r)
+        return bf_err_r(r, "failed to update ct_meta GC counters");
+
+    return 0;
+}
+
 int bf_ct_maps_init_meta(struct bf_ct_maps *maps)
 {
     struct ct_meta meta = {};

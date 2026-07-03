@@ -47,6 +47,10 @@
 #define BF_CT_SRC_COUNT_MAX 65536u
 #define BF_CT_MAP_SPI_REVERSE_MAX 65536u
 
+/* New-connection rate limits, per source IP *per CPU*: ct_src_rate is a
+ * per-CPU LRU map so the datapath never contends on a shared counter. With
+ * RSS spreading a source's traffic across N cores, the effective host-wide
+ * limit is up to N times these values. */
 #define CT_RATE_LIMIT_TCP 100u
 #define CT_RATE_LIMIT_UDP 50u
 #define CT_RATE_LIMIT_ICMP 20u
@@ -178,8 +182,6 @@ struct ct_stats_counters
     __u64 dropped_rate_limit;
     __u64 dropped_src_count;
     __u64 ringbuf_drops;
-    __u64 gc_phase1_marked;
-    __u64 gc_phase2_deleted;
 } __attribute__((packed));
 
 /**
@@ -228,6 +230,10 @@ struct bf_ct_pkt_info
     __u8 tcp_ack;
     __u8 tcp_rst;
     __u8 tcp_fin;
+    /** Set by the lookup stub during key normalization: 1 if the packet
+     * source is the key's @c lo_ip side. Lets the create stub reuse the
+     * lookup's parse and normalization instead of redoing both. */
+    __u8 orig_lo_is_src;
     __be32 src_v4;
     __be32 dst_v4;
     struct in6_addr src_v6;
@@ -280,13 +286,21 @@ struct ct_tail_scratch
 } __attribute__((packed));
 
 /**
- * Userspace-owned conntrack metadata (key-norm version, GC heartbeat).
+ * Userspace-owned conntrack metadata (key-norm version, GC heartbeat, GC
+ * counters).
+ *
+ * The GC counters live here rather than in the per-CPU @ref ct_stats_counters
+ * map: only the GC writes them, and a userspace read-modify-write of the
+ * per-CPU stats array would silently drop any datapath increment landing
+ * between the read and the write, on any CPU.
  */
 struct ct_meta
 {
     __u32 key_norm_version;
     __u64 last_sweep_ns;
     __u32 _pad;
+    __u64 gc_phase1_marked;
+    __u64 gc_phase2_deleted;
 } __attribute__((packed));
 
 #define BF_CT_KEY_NORM_VERSION 1u
@@ -347,11 +361,11 @@ static_assert(sizeof(struct ct_entry) == 64);
 static_assert(sizeof(struct ct_rate_entry) == 16);
 static_assert(sizeof(struct ct_src_count_entry) == 8);
 static_assert(sizeof(struct ct_timeouts) == 112);
-static_assert(sizeof(struct ct_stats_counters) == 96);
+static_assert(sizeof(struct ct_stats_counters) == 80);
 static_assert(sizeof(struct ct_ip_key) == 16);
 static_assert(sizeof(struct ct_spi_reverse_key) == 16);
 static_assert(sizeof(struct ct_tail_scratch) == 44);
-static_assert(sizeof(struct ct_meta) == 16);
+static_assert(sizeof(struct ct_meta) == 32);
 #elif !defined(__cplusplus)
 _Static_assert(sizeof(struct ct_key_v4) == 16, "ct_key_v4 must be 16 bytes");
 _Static_assert(sizeof(struct ct_key_v6) == 40, "ct_key_v6 must be 40 bytes");
@@ -360,14 +374,14 @@ _Static_assert(sizeof(struct ct_rate_entry) == 16, "ct_rate_entry must be 16 byt
 _Static_assert(sizeof(struct ct_src_count_entry) == 8,
                "ct_src_count_entry must be 8 bytes");
 _Static_assert(sizeof(struct ct_timeouts) == 112, "ct_timeouts must be 112 bytes");
-_Static_assert(sizeof(struct ct_stats_counters) == 96,
-               "ct_stats_counters must be 96 bytes");
+_Static_assert(sizeof(struct ct_stats_counters) == 80,
+               "ct_stats_counters must be 80 bytes");
 _Static_assert(sizeof(struct ct_ip_key) == 16, "ct_ip_key must be 16 bytes");
 _Static_assert(sizeof(struct ct_spi_reverse_key) == 16,
                "ct_spi_reverse_key must be 16 bytes");
 _Static_assert(sizeof(struct ct_tail_scratch) == 44,
                "ct_tail_scratch must be 44 bytes");
-_Static_assert(sizeof(struct ct_meta) == 16, "ct_meta must be 16 bytes");
+_Static_assert(sizeof(struct ct_meta) == 32, "ct_meta must be 32 bytes");
 #endif
 
 #define _free_bf_ct_maps_ __attribute__((__cleanup__(bf_ct_maps_free)))
@@ -650,3 +664,9 @@ int bf_ct_meta_get(struct ct_meta *out, const struct bf_ct_maps *maps);
  * @brief Record the timestamp of the latest GC sweep batch.
  */
 int bf_ct_meta_set_last_sweep_ns(const struct bf_ct_maps *maps, __u64 ns);
+
+/**
+ * @brief Accumulate GC phase counters into the @c ct_meta singleton.
+ */
+int bf_ct_meta_add_gc_stats(const struct bf_ct_maps *maps, __u64 phase1,
+                            __u64 phase2);

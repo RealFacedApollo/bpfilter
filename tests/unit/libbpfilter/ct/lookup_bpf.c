@@ -534,6 +534,48 @@ static struct bft_ct_pkt *_bft_ct_build_esp_v4(__be32 src, __be32 dst, __u32 spi
     return TAKE_PTR(pkt);
 }
 
+/* AH header (RFC 4302): next_hdr, payload_len, reserved(2), then the SPI at
+ * offset 4 — unlike ESP, which leads with the SPI. */
+static struct bft_ct_pkt *_bft_ct_build_ah_v4(__be32 src, __be32 dst, __u32 spi)
+{
+    _free_bft_ct_pkt_ struct bft_ct_pkt *pkt = NULL;
+    struct ethhdr *eth;
+    struct iphdr *ip;
+    __u8 *ah;
+    size_t ah_len = 12;
+    size_t total;
+
+    total = sizeof(*eth) + sizeof(*ip) + ah_len;
+    pkt = calloc(1, sizeof(*pkt));
+    if (!pkt)
+        return NULL;
+
+    pkt->data = calloc(1, total);
+    if (!pkt->data)
+        return NULL;
+
+    pkt->len = total;
+
+    eth = (struct ethhdr *)pkt->data;
+    eth->h_proto = _htons_u16(ETH_P_IP);
+
+    ip = (struct iphdr *)(pkt->data + sizeof(*eth));
+    ip->version = 4;
+    ip->ihl = 5;
+    ip->tot_len = _htons_u16((uint16_t)(sizeof(*ip) + ah_len));
+    ip->ttl = 64;
+    ip->protocol = IPPROTO_AH;
+    ip->saddr = src;
+    ip->daddr = dst;
+
+    ah = pkt->data + sizeof(*eth) + sizeof(*ip);
+    ah[0] = IPPROTO_TCP;
+    ah[1] = 4;
+    *(__u32 *)(ah + 4) = htobe32(spi);
+
+    return TAKE_PTR(pkt);
+}
+
 static struct in6_addr _ipv6_words(uint32_t w0, uint32_t w1, uint32_t w2,
                                    uint32_t w3)
 {
@@ -671,6 +713,55 @@ static struct bft_ct_pkt *_bft_ct_build_gre_v4(__be32 src, __be32 dst, __u32 key
     gre[1] = _htons_u16(ETH_P_IP);
     gre_key = (__u32 *)(gre + 2);
     *gre_key = htobe32(key);
+
+    return TAKE_PTR(pkt);
+}
+
+/* Keyed GRE with a present checksum (C|K flags): the checksum word occupies
+ * offset 4, pushing the key to offset 8 (RFC 2890 field ordering). */
+static struct bft_ct_pkt *_bft_ct_build_gre_csum_v4(__be32 src, __be32 dst,
+                                                    __u32 key)
+{
+    _free_bft_ct_pkt_ struct bft_ct_pkt *pkt = NULL;
+    struct ethhdr *eth;
+    struct iphdr *ip;
+    __be16 *gre;
+    __u32 *fields;
+    /* 12 bytes of header (flags, proto, checksum, key) plus 4 bytes of inner
+     * payload so the harness L4 loader picks its 16-byte tier — the 8-byte
+     * tier would truncate the key away. */
+    size_t gre_len = 16;
+    size_t total;
+
+    total = sizeof(*eth) + sizeof(*ip) + gre_len;
+    pkt = calloc(1, sizeof(*pkt));
+    if (!pkt)
+        return NULL;
+
+    pkt->data = calloc(1, total);
+    if (!pkt->data)
+        return NULL;
+
+    pkt->len = total;
+
+    eth = (struct ethhdr *)pkt->data;
+    eth->h_proto = _htons_u16(ETH_P_IP);
+
+    ip = (struct iphdr *)(pkt->data + sizeof(*eth));
+    ip->version = 4;
+    ip->ihl = 5;
+    ip->tot_len = _htons_u16((uint16_t)(sizeof(*ip) + gre_len));
+    ip->ttl = 64;
+    ip->protocol = IPPROTO_GRE;
+    ip->saddr = src;
+    ip->daddr = dst;
+
+    gre = (__be16 *)(pkt->data + sizeof(*eth) + sizeof(*ip));
+    gre[0] = _htons_u16(0xa000);
+    gre[1] = _htons_u16(ETH_P_IP);
+    fields = (__u32 *)(gre + 2);
+    fields[0] = htobe32(0xdeadbeef);
+    fields[1] = htobe32(key);
 
     return TAKE_PTR(pkt);
 }
@@ -903,6 +994,41 @@ static void lookup_tcp_rst(void **state)
     r = bf_bpf_map_lookup_elem(h->tcp_fd, &key, &entry);
     assert_ok(r);
     assert_true(entry.flags & CT_FLAG_DYING);
+}
+
+/* A reconnect on a 4-tuple whose entry is a DYING corpse (post-RST) must
+ * replace the corpse: with a plain BPF_NOEXIST insert the flow would be
+ * untrackable until the GC reaps the old entry. */
+static void lookup_tcp_rst_then_reconnect(void **state)
+{
+    struct bft_ct_harness *h = *state;
+    _free_bft_ct_pkt_ struct bft_ct_pkt *rst = NULL;
+    _free_bft_ct_pkt_ struct bft_ct_pkt *syn = NULL;
+    struct ct_key_v4 key = _bft_tcp_key();
+    struct ct_entry entry = {};
+    int r;
+
+    _bft_tcp_handshake_steps(h);
+
+    rst = _bft_ct_build_tcp_v4(_ipv4(1, 2, 3, 4), _ipv4(10, 0, 0, 1),
+                               _htons_u16(55000), _htons_u16(443), 0x04);
+    assert_ok(_bft_ct_set_op(h, CT_TEST_OP_LOOKUP_UPDATE_TCP));
+    (void)_bft_ct_run(h, rst->data, rst->len);
+
+    r = bf_bpf_map_lookup_elem(h->tcp_fd, &key, &entry);
+    assert_ok(r);
+    assert_true(entry.flags & CT_FLAG_DYING);
+
+    syn = _bft_ct_build_tcp_v4(_ipv4(1, 2, 3, 4), _ipv4(10, 0, 0, 1),
+                               _htons_u16(55000), _htons_u16(443), 0x02);
+    assert_ok(_bft_ct_set_op(h, CT_TEST_OP_LOOKUP_CREATE));
+    assert_int_equal(_bft_ct_run(h, syn->data, syn->len), CT_STATE_NEW);
+
+    r = bf_bpf_map_lookup_elem(h->tcp_fd, &key, &entry);
+    assert_ok(r);
+    assert_false(entry.flags & CT_FLAG_DYING);
+    assert_int_equal(entry.internal_state, CT_TCP_SYN_SENT);
+    assert_int_equal(entry.rx_packets, 1);
 }
 
 static void lookup_udp_bidirectional(void **state)
@@ -1290,6 +1416,57 @@ static void lookup_gre_different_key(void **state)
     assert_int_equal(r, CT_STATE_NEW);
 }
 
+/* A checksummed keyed GRE packet must be keyed on the key field (offset 8),
+ * not the checksum word at offset 4: it has to hit the entry created by an
+ * unchecksummed packet carrying the same key. */
+static void lookup_gre_csum_key_offset(void **state)
+{
+    struct bft_ct_harness *h = *state;
+    _free_bft_ct_pkt_ struct bft_ct_pkt *plain = NULL;
+    _free_bft_ct_pkt_ struct bft_ct_pkt *csum = NULL;
+    struct ct_key_v4 key = {};
+    struct ct_entry entry = {};
+    bool orig_lo_is_src;
+    int r;
+
+    plain =
+        _bft_ct_build_gre_v4(_ipv4(10, 11, 0, 1), _ipv4(10, 11, 0, 2), 0x1234);
+    assert_ok(_bft_ct_set_op(h, CT_TEST_OP_LOOKUP_CREATE));
+    assert_int_equal(_bft_ct_run(h, plain->data, plain->len), CT_STATE_NEW);
+
+    csum = _bft_ct_build_gre_csum_v4(_ipv4(10, 11, 0, 2), _ipv4(10, 11, 0, 1),
+                                     0x1234);
+    assert_ok(_bft_ct_set_op(h, CT_TEST_OP_LOOKUP));
+    r = _bft_ct_run(h, csum->data, csum->len);
+    assert_int_equal(r, CT_STATE_ESTABLISHED | CT_STATE_REPLY);
+
+    bf_ct_key_normalize_v4(_ipv4(10, 11, 0, 1), _ipv4(10, 11, 0, 2), 0x1234, 0,
+                           IPPROTO_GRE, &key, &orig_lo_is_src);
+    assert_ok(bf_bpf_map_lookup_elem(h->any_fd, &key, &entry));
+    assert_true(entry.flags & CT_FLAG_SEEN_REPLY);
+}
+
+/* The AH SPI lives at offset 4 (RFC 4302); reading the ESP offset would key
+ * the flow on next_hdr|payload_len|reserved instead. */
+static void lookup_ah_spi_offset(void **state)
+{
+    struct bft_ct_harness *h = *state;
+    _free_bft_ct_pkt_ struct bft_ct_pkt *pkt = NULL;
+    struct ct_key_v4 key = {};
+    struct ct_entry entry = {};
+    bool orig_lo_is_src;
+
+    pkt = _bft_ct_build_ah_v4(_ipv4(10, 12, 0, 1), _ipv4(10, 12, 0, 2),
+                              0xaabbccdd);
+    assert_ok(_bft_ct_set_op(h, CT_TEST_OP_LOOKUP_CREATE));
+    assert_int_equal(_bft_ct_run(h, pkt->data, pkt->len), CT_STATE_NEW);
+
+    bf_ct_key_normalize_v4(_ipv4(10, 12, 0, 1), _ipv4(10, 12, 0, 2), 0xaabbccdd,
+                           0, IPPROTO_AH, &key, &orig_lo_is_src);
+    assert_ok(bf_bpf_map_lookup_elem(h->any_fd, &key, &entry));
+    assert_int_equal(entry.orig_discriminator, 0xaabbccdd);
+}
+
 static void lookup_src_count_limit(void **state)
 {
     struct bft_ct_harness *h = *state;
@@ -1322,20 +1499,20 @@ int main(void)
         cmocka_unit_test_setup_teardown(lookup_tcp_handshake,
                                         _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),
-        cmocka_unit_test_setup_teardown(lookup_tcp_reply,
-                                        _bft_ct_setup_harness,
+        cmocka_unit_test_setup_teardown(lookup_tcp_reply, _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),
         cmocka_unit_test_setup_teardown(lookup_tcp_unsolicited_ack,
                                         _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),
-        cmocka_unit_test_setup_teardown(lookup_tcp_rst,
+        cmocka_unit_test_setup_teardown(lookup_tcp_rst, _bft_ct_setup_harness,
+                                        _bft_ct_teardown_harness),
+        cmocka_unit_test_setup_teardown(lookup_tcp_rst_then_reconnect,
                                         _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),
         cmocka_unit_test_setup_teardown(lookup_udp_bidirectional,
                                         _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),
-        cmocka_unit_test_setup_teardown(lookup_icmp_echo,
-                                        _bft_ct_setup_harness,
+        cmocka_unit_test_setup_teardown(lookup_icmp_echo, _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),
         cmocka_unit_test_setup_teardown(lookup_icmp_related,
                                         _bft_ct_setup_harness,
@@ -1361,15 +1538,20 @@ int main(void)
         cmocka_unit_test_setup_teardown(lookup_gre_different_key,
                                         _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),
+        cmocka_unit_test_setup_teardown(lookup_gre_csum_key_offset,
+                                        _bft_ct_setup_harness,
+                                        _bft_ct_teardown_harness),
+        cmocka_unit_test_setup_teardown(lookup_ah_spi_offset,
+                                        _bft_ct_setup_harness,
+                                        _bft_ct_teardown_harness),
         cmocka_unit_test_setup_teardown(lookup_esp_spi_reverse,
                                         _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),
         cmocka_unit_test_setup_teardown(lookup_esp_reply_no_reverse,
                                         _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),
-        cmocka_unit_test_setup_teardown(lookup_rate_limit,
-                                        _bft_ct_setup_harness,
-                                        _bft_ct_teardown_harness),
+        cmocka_unit_test_setup_teardown(
+            lookup_rate_limit, _bft_ct_setup_harness, _bft_ct_teardown_harness),
         cmocka_unit_test_setup_teardown(lookup_src_count_limit,
                                         _bft_ct_setup_harness,
                                         _bft_ct_teardown_harness),

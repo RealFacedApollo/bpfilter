@@ -261,11 +261,38 @@ static int _bf_ct_emit_scratch_apply(struct bf_program *program, int src_reg)
     return _bf_ct_emit_copy_key_v4(program, src_reg);
 }
 
+/* Hooks whose generated program can feed the CT datapath: the prologue must
+ * initialize bf_runtime.dynptr and the L3/L4 offsets/sizes the CT header copy
+ * reads. cgroup_sock_addr programs have no packet (emitting CT there produces
+ * verifier-rejected reads of uninitialized stack), and XDP is excluded by
+ * design: conntrack is a TC-level feature — XDP has no egress counterpart, so
+ * entries created there could never see reply traffic. */
+static bool _bf_ct_hook_supports_ct(enum bf_hook hook)
+{
+    switch (hook) {
+    case BF_HOOK_TC_INGRESS:
+    case BF_HOOK_TC_EGRESS:
+    case BF_HOOK_CGROUP_SKB_INGRESS:
+    case BF_HOOK_CGROUP_SKB_EGRESS:
+    case BF_HOOK_NF_PRE_ROUTING:
+    case BF_HOOK_NF_LOCAL_IN:
+    case BF_HOOK_NF_FORWARD:
+    case BF_HOOK_NF_LOCAL_OUT:
+    case BF_HOOK_NF_POST_ROUTING:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool bf_program_chain_uses_ct(const struct bf_program *program)
 {
     assert(program);
 
     if (!bf_chain_uses_conntrack(program->runtime.chain))
+        return false;
+
+    if (!_bf_ct_hook_supports_ct(program->runtime.chain->hook))
         return false;
 
     return bf_ctx_get_ct_maps() != NULL;

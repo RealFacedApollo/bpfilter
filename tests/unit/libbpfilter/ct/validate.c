@@ -107,15 +107,39 @@ static void hook_compat_tc_ok(void **state)
     assert_ok(bf_ct_validate_hook_compat(chain));
 }
 
-static void hook_compat_xdp_rejects(void **state)
+/* BF_CHAIN_CONNTRACK alone (e.g. from an ACCEPT policy) must not reject an XDP
+ * chain: only ct.conntrack matchers are incompatible with the hook. */
+static void hook_compat_xdp_stateless_ok(void **state)
 {
     _free_bf_chain_ struct bf_chain *chain = NULL;
 
     (void)state;
 
-    assert_ok(bf_chain_new(&chain, "xdp", BF_HOOK_XDP, BF_VERDICT_DROP, NULL,
+    assert_ok(bf_chain_new(&chain, "xdp", BF_HOOK_XDP, BF_VERDICT_ACCEPT, NULL,
                            NULL));
-    chain->flags |= BF_FLAG(BF_CHAIN_CONNTRACK);
+    assert_ok(bf_ct_validate_hook_compat(chain));
+}
+
+static void hook_compat_xdp_ct_matcher_rejects(void **state)
+{
+    _free_bf_chain_ struct bf_chain *chain = NULL;
+    _clean_bf_list_ bf_list rules = bf_list_default(bf_rule_free, bf_rule_pack);
+    struct bf_rule *rule = NULL;
+    struct bf_match_ct_payload ct = {.state_mask = CT_STATE_ESTABLISHED};
+
+    (void)state;
+
+    assert_ok(bf_rule_new(&rule));
+    assert_ok(bf_rule_add_matcher(rule, BF_MATCHER_CONNTRACK, BF_MATCHER_EQ,
+                                  &ct, sizeof(ct), false));
+    rule->verdict = BF_VERDICT_ACCEPT;
+    assert_ok(bf_list_add_tail(&rules, rule));
+
+    /* Built on TC (bf_chain_new rejects ct.conntrack on XDP outright), then
+     * re-hooked so the validator's own check is what fires. */
+    assert_ok(bf_chain_new(&chain, "xdp_ct", BF_HOOK_TC_INGRESS,
+                           BF_VERDICT_DROP, NULL, &rules));
+    chain->hook = BF_HOOK_XDP;
     assert_err(bf_ct_validate_hook_compat(chain));
 }
 
@@ -157,7 +181,8 @@ int main(void)
         cmocka_unit_test(timeouts_clamp_high),
         cmocka_unit_test(timeouts_clamp_defaults_unchanged),
         cmocka_unit_test(hook_compat_tc_ok),
-        cmocka_unit_test(hook_compat_xdp_rejects),
+        cmocka_unit_test(hook_compat_xdp_stateless_ok),
+        cmocka_unit_test(hook_compat_xdp_ct_matcher_rejects),
         cmocka_unit_test(warn_chain_policy_smoke),
     };
 

@@ -36,22 +36,20 @@ bf_ct_bpf_initial_sctp_state(const struct bf_ct_pkt_info *pkt)
 }
 
 static __always_inline __u8
-bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx,
+bf_ct_bpf_create_entry_v4(struct ct_subprog_scratch *s, struct bf_runtime *ctx,
                           const struct bf_ct_pkt_info *pkt,
                           struct ct_key_v4 *key, __u8 orig_lo_is_src)
 {
-    struct ct_subprog_scratch *s = bf_ct_bpf_scratch();
     struct ct_ip_key *ip_key;
     struct ct_entry *entry;
     void *flow_map;
     __u64 now_ns;
     int r;
 
-    if (!s)
-        return 0;
     /* The conntrack entry and the rate/count working keys are staged in the
-     * per-CPU scratch map rather than on this subprogram's stack, to keep the
-     * combined BPF stack within budget. */
+     * per-CPU scratch map (@p s, already resolved by the caller) rather than
+     * on this subprogram's stack, to keep the combined BPF stack within
+     * budget. */
     entry = &s->entry;
     __builtin_memset(entry, 0, sizeof(*entry));
     ip_key = &s->ip_key;
@@ -96,9 +94,27 @@ bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx,
 
         *local = *key;
         r = bpf_map_update_elem(flow_map, local, entry, BPF_NOEXIST);
+        if (r) {
+            /* The key is occupied by a DYING corpse (e.g. after a TCP RST):
+             * the flow re-classifies NEW until the GC reaps it, so replace it
+             * in place — otherwise an immediate reconnect on the same 4-tuple
+             * is untrackable for up to a GC interval. The corpse's originator
+             * is un-counted first, mirroring what the GC does on deletion. */
+            struct ct_entry *old = bpf_map_lookup_elem(flow_map, local);
+
+            if (!old || !(old->flags & CT_FLAG_DYING))
+                return 0;
+
+            bf_ct_bpf_ip_key_from_v4(
+                old->orig_lo_is_src ? key->lo_ip : key->hi_ip, ip_key);
+            bf_ct_bpf_src_count_dec((void *)&bf_ct_map_src_count, ip_key);
+
+            if (bpf_map_update_elem(flow_map, local, entry, BPF_ANY))
+                return 0;
+
+            bf_ct_bpf_ip_key_from_v4(pkt->src_v4, ip_key);
+        }
     }
-    if (r)
-        return 0;
 
     bf_ct_bpf_src_count_inc((void *)&bf_ct_map_src_count, ip_key,
                             &s->count_fresh);
@@ -107,19 +123,16 @@ bf_ct_bpf_create_entry_v4(struct bf_runtime *ctx,
 }
 
 static __always_inline __u8
-bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx,
+bf_ct_bpf_create_entry_v6(struct ct_subprog_scratch *s, struct bf_runtime *ctx,
                           const struct bf_ct_pkt_info *pkt,
                           struct ct_key_v6 *key, __u8 orig_lo_is_src)
 {
-    struct ct_subprog_scratch *s = bf_ct_bpf_scratch();
     struct ct_ip_key *ip_key;
     struct ct_entry *entry;
     void *flow_map;
     __u64 now_ns;
     int r;
 
-    if (!s)
-        return 0;
     /* See bf_ct_bpf_create_entry_v4(): entry and the rate/count keys are
      * staged in scratch. */
     entry = &s->entry;
@@ -164,9 +177,24 @@ bf_ct_bpf_create_entry_v6(struct bf_runtime *ctx,
 
         *local = *key;
         r = bpf_map_update_elem(flow_map, local, entry, BPF_NOEXIST);
+        if (r) {
+            /* See bf_ct_bpf_create_entry_v4(): replace a DYING corpse in
+             * place, un-counting its originator first. */
+            struct ct_entry *old = bpf_map_lookup_elem(flow_map, local);
+
+            if (!old || !(old->flags & CT_FLAG_DYING))
+                return 0;
+
+            bf_ct_bpf_ip_key_from_v6(
+                old->orig_lo_is_src ? &key->lo_ip : &key->hi_ip, ip_key);
+            bf_ct_bpf_src_count_dec((void *)&bf_ct_map_src_count, ip_key);
+
+            if (bpf_map_update_elem(flow_map, local, entry, BPF_ANY))
+                return 0;
+
+            bf_ct_bpf_ip_key_from_v6(&pkt->src_v6, ip_key);
+        }
     }
-    if (r)
-        return 0;
 
     bf_ct_bpf_src_count_inc((void *)&bf_ct_map_src_count, ip_key,
                             &s->count_fresh);
@@ -180,7 +208,6 @@ bf_ct_bpf_create_if_new(struct bf_runtime *ctx, __u8 ct_state, __u8 is_v6,
 {
     struct ct_subprog_scratch *s;
     struct bf_ct_pkt_info *pkt;
-    __u8 orig_lo_is_src = 0;
 
     if (ct_state != CT_STATE_NEW || !ctx)
         return 0;
@@ -188,41 +215,20 @@ bf_ct_bpf_create_if_new(struct bf_runtime *ctx, __u8 ct_state, __u8 is_v6,
     s = bf_ct_bpf_scratch();
     if (!s)
         return 0;
-    pkt = &s->pkt;
 
-    if (bf_ct_bpf_parse_runtime(ctx, pkt) < 0)
+    /* CT_STATE_NEW implies the lookup stub already ran for this packet on
+     * this CPU: the parsed packet is still in the per-CPU scratch and the
+     * normalized keys are in @p key_v4 / @p key_v6 (restored from
+     * ct_tail_scratch across tail-call segments). Re-parsing and
+     * re-normalizing here would double the per-connection setup cost. */
+    pkt = &s->pkt;
+    if (pkt->is_v6 != is_v6)
         return 0;
 
     if (is_v6) {
-        __u32 src_disc = pkt->sport;
-        __u32 dst_disc = pkt->dport;
-
-        if (pkt->proto == IPPROTO_ICMPV6)
-            src_disc = pkt->icmp_id;
-        else if (pkt->proto == IPPROTO_ESP || pkt->proto == IPPROTO_AH)
-            src_disc = pkt->spi;
-        else if (pkt->proto == IPPROTO_GRE)
-            src_disc = pkt->gre_key;
-
-        bf_ct_bpf_key_normalize_v6(&pkt->src_v6, &pkt->dst_v6, src_disc,
-                                   dst_disc, pkt->proto, key_v6,
-                                   &orig_lo_is_src);
-        return bf_ct_bpf_create_entry_v6(ctx, pkt, key_v6, orig_lo_is_src);
+        return bf_ct_bpf_create_entry_v6(s, ctx, pkt, key_v6,
+                                         pkt->orig_lo_is_src);
     }
 
-    {
-        __u32 src_disc = pkt->sport;
-        __u32 dst_disc = pkt->dport;
-
-        if (pkt->proto == IPPROTO_ICMP)
-            src_disc = pkt->icmp_id;
-        else if (pkt->proto == IPPROTO_ESP || pkt->proto == IPPROTO_AH)
-            src_disc = pkt->spi;
-        else if (pkt->proto == IPPROTO_GRE)
-            src_disc = pkt->gre_key;
-
-        bf_ct_bpf_key_normalize_v4(pkt->src_v4, pkt->dst_v4, src_disc, dst_disc,
-                                   pkt->proto, key_v4, &orig_lo_is_src);
-        return bf_ct_bpf_create_entry_v4(ctx, pkt, key_v4, orig_lo_is_src);
-    }
+    return bf_ct_bpf_create_entry_v4(s, ctx, pkt, key_v4, pkt->orig_lo_is_src);
 }

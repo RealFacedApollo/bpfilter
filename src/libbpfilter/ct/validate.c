@@ -126,17 +126,21 @@ int bf_ct_validate_hook_compat(const struct bf_chain *chain)
     if (chain->hook != BF_HOOK_XDP)
         return 0;
 
-    if (!(chain->flags & BF_FLAG(BF_CHAIN_CONNTRACK)))
+    /* Only chains that consume conntrack state (ct.conntrack matchers) are
+     * incompatible with XDP. BF_CHAIN_CONNTRACK alone is not: every
+     * ACCEPT-policy chain carries it so entry creation can be emitted when
+     * conntrack is armed, and rejecting on the flag would refuse fully
+     * stateless XDP chains. */
+    if (!bf_ct_chain_consumes_ct(chain))
         return 0;
 
     return bf_err_r(
         -ENOTSUP,
-        "chain '%s': rules containing ct.conntrack (or any rule with an "
-        "implicit ACCEPT that creates conntrack entries) cannot be attached "
-        "to BF_HOOK_XDP. XDP has no egress hook; outbound-initiated flows "
-        "can never be tracked. Use TC attachment "
-        "(BF_HOOK_TC_INGRESS / BF_HOOK_TC_EGRESS) for stateful rules, or "
-        "mark rules NOTRACK to suppress entry creation and use XDP",
+        "chain '%s': rules containing ct.conntrack cannot be attached to "
+        "BF_HOOK_XDP. Conntrack is only supported on skb-based hooks; XDP "
+        "has no egress hook, so outbound-initiated flows can never be "
+        "tracked. Use TC attachment (BF_HOOK_TC_INGRESS / BF_HOOK_TC_EGRESS) "
+        "for stateful rules",
         chain->name);
 }
 

@@ -116,15 +116,15 @@ defaults unless overridden through the library API.
 Hook compatibility (error)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Chains that create or consult conntrack state cannot attach to
-``BF_HOOK_XDP``. This includes:
+Chains that consult conntrack state (``ct.conntrack`` matchers) cannot attach
+to ``BF_HOOK_XDP``: conntrack is only supported on skb-based hooks, and XDP
+has no egress counterpart, so outbound-initiated flows could never be tracked.
+Use ``BF_HOOK_TC_INGRESS`` / ``BF_HOOK_TC_EGRESS`` for stateful rules.
 
-- explicit ``ct.conntrack`` matchers
-- ``ACCEPT`` rules without ``NOTRACK`` (implicit entry creation)
-- ``ACCEPT`` chain policy
-
-Use ``BF_HOOK_TC_INGRESS`` / ``BF_HOOK_TC_EGRESS`` for stateful rules, or mark
-rules ``NOTRACK`` for stateless XDP chains.
+Stateless XDP chains — including those with an ``ACCEPT`` policy or ``ACCEPT``
+rules — load normally; the conntrack datapath (lookup, entry creation) is
+simply never emitted for XDP or ``cgroup_sock_addr`` programs, even when
+conntrack is armed on the host.
 
 ``bf_ct_validate_hook_compat()`` runs in ``bf_chain_new()`` and
 ``bf_program_new()``.

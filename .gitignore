@@ -44,3 +44,6 @@ doc/conf.py
 src/libbpfilter/include/bpfilter/version.h
 src/libbpfilter/include/cgen/rawstubs.h
 src/libbpfilter/elfstubs/
+/build-linux
+
+.*

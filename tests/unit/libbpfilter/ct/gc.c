@@ -6,8 +6,8 @@
 #include <linux/bpf.h>
 #include <linux/in.h>
 
-#include <bpf/libbpf.h>
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <bpfilter/bpf.h>
@@ -84,43 +84,6 @@ static int _bft_teardown_ctx_bpffs(void **state)
     return 0;
 }
 
-static int _bft_ct_stats_sum(const struct bf_ct_maps *maps,
-                             struct ct_stats_counters *out)
-{
-    int ncpu = libbpf_num_possible_cpus();
-    __u32 key = 0;
-    struct ct_stats_counters *percpu;
-    int stats_fd;
-    int r;
-    int i;
-
-    stats_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_STATS);
-    if (stats_fd < 0)
-        return stats_fd;
-
-    if (ncpu <= 0)
-        return -EINVAL;
-
-    percpu = calloc((size_t)ncpu, sizeof(*percpu));
-    if (!percpu)
-        return -ENOMEM;
-
-    r = bf_bpf_map_lookup_elem(stats_fd, &key, percpu);
-    if (r) {
-        free(percpu);
-        return r;
-    }
-
-    memset(out, 0, sizeof(*out));
-    for (i = 0; i < ncpu; ++i) {
-        out->gc_phase1_marked += percpu[i].gc_phase1_marked;
-        out->gc_phase2_deleted += percpu[i].gc_phase2_deleted;
-    }
-
-    free(percpu);
-    return 0;
-}
-
 static void gc_two_phase_eviction(void **state)
 {
     const struct bf_ct_maps *maps = bf_ctx_get_ct_maps();
@@ -139,8 +102,8 @@ static void gc_two_phase_eviction(void **state)
     struct ct_timeouts timeouts;
     struct ct_ip_key ip_key;
     struct ct_src_count_entry count = {.count = 1};
-    struct ct_stats_counters stats_before = {};
-    struct ct_stats_counters stats_after = {};
+    struct ct_meta meta_before = {};
+    struct ct_meta meta_after = {};
     struct bf_ct_gc gc;
     struct bf_ct_gc_opts opts = {.batch_size = 100};
     __u32 tkey = 0;
@@ -177,7 +140,7 @@ static void gc_two_phase_eviction(void **state)
     r = bf_bpf_map_update_elem(src_count_fd, &ip_key, &count, BPF_ANY);
     assert_ok(r);
 
-    assert_ok(_bft_ct_stats_sum(maps, &stats_before));
+    assert_ok(bf_ct_meta_get(&meta_before, maps));
 
     bf_ct_gc_init(&gc);
     assert_ok(bf_ct_gc_sweep_batch(maps, &gc, &opts));
@@ -186,9 +149,9 @@ static void gc_two_phase_eviction(void **state)
     assert_ok(r);
     assert_true(entry.flags & CT_FLAG_DYING);
 
-    assert_ok(_bft_ct_stats_sum(maps, &stats_after));
-    assert_true(stats_after.gc_phase1_marked >=
-                stats_before.gc_phase1_marked + 1);
+    assert_ok(bf_ct_meta_get(&meta_after, maps));
+    assert_true(meta_after.gc_phase1_marked >=
+                meta_before.gc_phase1_marked + 1);
 
     assert_ok(bf_ct_gc_sweep_batch(maps, &gc, &opts));
 
@@ -198,10 +161,61 @@ static void gc_two_phase_eviction(void **state)
     r = bf_bpf_map_lookup_elem(src_count_fd, &ip_key, &count);
     assert_int_equal(r, -ENOENT);
 
-    stats_before = stats_after;
-    assert_ok(_bft_ct_stats_sum(maps, &stats_after));
-    assert_true(stats_after.gc_phase2_deleted >=
-                stats_before.gc_phase2_deleted + 1);
+    meta_before = meta_after;
+    assert_ok(bf_ct_meta_get(&meta_after, maps));
+    assert_true(meta_after.gc_phase2_deleted >=
+                meta_before.gc_phase2_deleted + 1);
+}
+
+/* An entry whose last_seen_ns is ahead of the sweep's now_ns snapshot — the
+ * datapath touched it mid-sweep — must be treated as fresh. An unsigned
+ * now - last_seen delta would wrap and reap the busiest connections. */
+static void gc_fresh_entry_not_reaped(void **state)
+{
+    const struct bf_ct_maps *maps = bf_ctx_get_ct_maps();
+    struct ct_key_v4 key = {
+        .lo_ip = _be32(10, 0, 0, 3),
+        .hi_ip = _be32(10, 0, 0, 4),
+        .discriminator = (443u << 16) | 55001u,
+        .proto = IPPROTO_TCP,
+    };
+    struct ct_entry entry = {
+        .proto = IPPROTO_TCP,
+        .orig_lo_is_src = 1,
+        .orig_src_ip = _be32(10, 0, 0, 3),
+        .orig_dst_ip = _be32(10, 0, 0, 4),
+    };
+    struct timespec ts;
+    struct bf_ct_gc gc;
+    struct bf_ct_gc_opts opts = {.batch_size = 100};
+    __u64 now_ns;
+    int tcp_fd;
+    int r;
+
+    (void)state;
+
+    assert_non_null(maps);
+
+    tcp_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_TCP);
+    assert_int_gte(tcp_fd, 0);
+
+    assert_ok(clock_gettime(CLOCK_MONOTONIC, &ts));
+    now_ns = (__u64)ts.tv_sec * BF_CT_NS_PER_S + (__u64)ts.tv_nsec;
+
+    entry.last_seen_ns = now_ns + 3600ULL * BF_CT_NS_PER_S;
+    entry.created_ns = entry.last_seen_ns;
+
+    r = bf_bpf_map_update_elem(tcp_fd, &key, &entry, BPF_ANY);
+    assert_ok(r);
+
+    bf_ct_gc_init(&gc);
+    assert_ok(bf_ct_gc_sweep_batch(maps, &gc, &opts));
+
+    r = bf_bpf_map_lookup_elem(tcp_fd, &key, &entry);
+    assert_ok(r);
+    assert_false(entry.flags & CT_FLAG_DYING);
+
+    assert_ok(bf_bpf_map_delete_elem(tcp_fd, &key));
 }
 
 /* Reaping a dying IPv6 entry must decrement the per-source count. The source is
@@ -354,6 +368,9 @@ int main(void)
 {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test_setup_teardown(gc_two_phase_eviction,
+                                        _bft_setup_ctx_bpffs_ct,
+                                        _bft_teardown_ctx_bpffs),
+        cmocka_unit_test_setup_teardown(gc_fresh_entry_not_reaped,
                                         _bft_setup_ctx_bpffs_ct,
                                         _bft_teardown_ctx_bpffs),
         cmocka_unit_test_setup_teardown(gc_v6_src_count_decrement,

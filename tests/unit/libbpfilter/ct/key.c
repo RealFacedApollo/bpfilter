@@ -42,7 +42,7 @@ static void struct_sizes(void **state)
     assert_int_equal(sizeof(struct ct_rate_entry), 16);
     assert_int_equal(sizeof(struct ct_src_count_entry), 8);
     assert_int_equal(sizeof(struct ct_timeouts), 112);
-    assert_int_equal(sizeof(struct ct_stats_counters), 96);
+    assert_int_equal(sizeof(struct ct_stats_counters), 80);
     assert_int_equal(sizeof(struct ct_ip_key), 16);
     assert_int_equal(sizeof(struct ct_spi_reverse_key), 16);
     assert_int_equal(sizeof(struct ct_tail_scratch), 44);

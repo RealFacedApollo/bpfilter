@@ -455,17 +455,20 @@ static void xdp_ct_matcher_rejected(void **state)
                             NULL, &rules));
 }
 
-static void xdp_policy_accept_rejected(void **state)
+/* An ACCEPT policy sets BF_CHAIN_CONNTRACK, but a stateless XDP chain must
+ * still load: only ct.conntrack matchers are incompatible with XDP. */
+static void xdp_policy_accept_ok(void **state)
 {
     _free_bf_chain_ struct bf_chain *chain = NULL;
 
     (void)state;
 
-    assert_err(bf_chain_new(&chain, "xdp_policy", BF_HOOK_XDP,
-                            BF_VERDICT_ACCEPT, NULL, NULL));
+    assert_ok(bf_chain_new(&chain, "xdp_policy", BF_HOOK_XDP, BF_VERDICT_ACCEPT,
+                           NULL, NULL));
+    assert_true(chain->flags & BF_FLAG(BF_CHAIN_CONNTRACK));
 }
 
-static void xdp_implicit_accept_rejected(void **state)
+static void xdp_implicit_accept_ok(void **state)
 {
     _free_bf_chain_ struct bf_chain *chain = NULL;
     _clean_bf_list_ bf_list rules = bf_list_default(bf_rule_free, bf_rule_pack);
@@ -477,8 +480,9 @@ static void xdp_implicit_accept_rejected(void **state)
     rule->verdict = BF_VERDICT_ACCEPT;
     assert_ok(bf_list_add_tail(&rules, rule));
 
-    assert_err(bf_chain_new(&chain, "xdp_accept", BF_HOOK_XDP, BF_VERDICT_DROP,
-                            NULL, &rules));
+    assert_ok(bf_chain_new(&chain, "xdp_accept", BF_HOOK_XDP, BF_VERDICT_DROP,
+                           NULL, &rules));
+    assert_true(chain->flags & BF_FLAG(BF_CHAIN_CONNTRACK));
 }
 
 static void xdp_notrack_ok(void **state)
@@ -518,8 +522,8 @@ int main(void)
         cmocka_unit_test(conntrack_flag_notrack_suppresses),
         cmocka_unit_test(conntrack_flag_policy_accept),
         cmocka_unit_test(xdp_ct_matcher_rejected),
-        cmocka_unit_test(xdp_policy_accept_rejected),
-        cmocka_unit_test(xdp_implicit_accept_rejected),
+        cmocka_unit_test(xdp_policy_accept_ok),
+        cmocka_unit_test(xdp_implicit_accept_ok),
         cmocka_unit_test(xdp_notrack_ok),
     };
 

@@ -21,23 +21,22 @@
 #include "ct/bpf/stats.h"
 
 static __always_inline struct ct_entry *
-bf_ct_bpf_lookup_entry_v4(struct ct_key_v4 *key, __u8 proto, __u32 spi)
+bf_ct_bpf_lookup_entry_v4(struct ct_subprog_scratch *s, struct ct_key_v4 *key,
+                          __u8 proto, __u32 spi)
 {
     /* Look up with a local copy of the key. The flow and spi-reverse maps are
      * referenced as relocatable globals (bf_ct_bpf_flow_map_global,
      * &bf_ct_map_spi_reverse), so each map operand is a BPF_LD_MAP_FD constant
      * the verifier always trusts — independent of the call frame. The key copy
-     * and the reverse key are staged in the per-CPU scratch map rather than on
-     * this subprogram's stack, to keep the combined BPF stack within budget. */
-    struct ct_subprog_scratch *s = bf_ct_bpf_scratch();
+     * and the reverse key are staged in the per-CPU scratch map (@p s, already
+     * resolved by the caller) rather than on this subprogram's stack, to keep
+     * the combined BPF stack within budget. */
     struct ct_key_v4 *local;
     struct ct_spi_reverse_key *rev_key;
     struct ct_entry *entry;
     void *map = bf_ct_bpf_flow_map_global(0, proto);
     __u32 *orig_spi;
 
-    if (!s)
-        return NULL;
     local = &s->local.key_v4;
     *local = *key;
 
@@ -65,19 +64,17 @@ bf_ct_bpf_lookup_entry_v4(struct ct_key_v4 *key, __u8 proto, __u32 spi)
 }
 
 static __always_inline struct ct_entry *
-bf_ct_bpf_lookup_entry_v6(struct ct_key_v6 *key, __u8 proto, __u32 spi)
+bf_ct_bpf_lookup_entry_v6(struct ct_subprog_scratch *s, struct ct_key_v6 *key,
+                          __u8 proto, __u32 spi)
 {
     /* See bf_ct_bpf_lookup_entry_v4(): maps are referenced as relocatable
      * globals, and the key copy / reverse key are staged in the scratch map. */
-    struct ct_subprog_scratch *s = bf_ct_bpf_scratch();
     struct ct_key_v6 *local;
     struct ct_spi_reverse_key *rev_key;
     struct ct_entry *entry;
     void *map = bf_ct_bpf_flow_map_global(1, proto);
     __u32 *orig_spi;
 
-    if (!s)
-        return NULL;
     local = &s->local.key_v6;
     *local = *key;
 
@@ -175,6 +172,10 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
     if (!ctx || !s)
         return CT_STATE_INVALID;
 
+    /* On a miss the packet is by definition not a reply; the hit paths below
+     * overwrite this from the resident entry's orientation. */
+    *is_reply = 0;
+
     /* The parsed packet fields are staged in the per-CPU scratch map rather
      * than on this subprogram's stack, to keep the combined BPF stack within
      * budget. */
@@ -201,13 +202,9 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
         bf_ct_bpf_key_normalize_v6(&pkt->src_v6, &pkt->dst_v6, src_disc,
                                    dst_disc, pkt->proto, key_v6,
                                    &orig_lo_is_src);
-        /* Pass the normalized key fields directly to the inline reply check
-         * rather than copying them into stack-local in6_addr temporaries; the
-         * copies kept the subprogram's stack frame oversized. */
-        *is_reply = bf_ct_bpf_is_reply_v6(&pkt->src_v6, orig_lo_is_src,
-                                          &key_v6->lo_ip, &key_v6->hi_ip);
+        pkt->orig_lo_is_src = orig_lo_is_src;
 
-        entry = bf_ct_bpf_lookup_entry_v6(key_v6, pkt->proto, pkt->spi);
+        entry = bf_ct_bpf_lookup_entry_v6(s, key_v6, pkt->proto, pkt->spi);
         if (!entry) {
             if (bf_ct_bpf_tcp_unsolicited_ack(pkt)) {
                 bf_ct_bpf_stats_invalid((void *)&bf_ct_map_stats);
@@ -220,6 +217,10 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
             __be32 lo_ip;
             __be32 hi_ip;
 
+            /* Pass the normalized key fields directly to the inline reply
+             * check rather than copying them into stack-local in6_addr
+             * temporaries; the copies kept the subprogram's stack frame
+             * oversized. */
             *is_reply = bf_ct_bpf_is_reply_v6(&pkt->src_v6,
                                               entry->orig_lo_is_src,
                                               &key_v6->lo_ip, &key_v6->hi_ip);
@@ -251,10 +252,9 @@ static __always_inline __u8 bf_ct_bpf_lookup(struct bf_runtime *ctx,
 
         bf_ct_bpf_key_normalize_v4(pkt->src_v4, pkt->dst_v4, src_disc, dst_disc,
                                    pkt->proto, key_v4, &orig_lo_is_src);
-        *is_reply = bf_ct_bpf_is_reply_v4(pkt->src_v4, orig_lo_is_src,
-                                          key_v4->lo_ip, key_v4->hi_ip);
+        pkt->orig_lo_is_src = orig_lo_is_src;
 
-        entry = bf_ct_bpf_lookup_entry_v4(key_v4, pkt->proto, pkt->spi);
+        entry = bf_ct_bpf_lookup_entry_v4(s, key_v4, pkt->proto, pkt->spi);
         if (!entry) {
             if (bf_ct_bpf_tcp_unsolicited_ack(pkt)) {
                 bf_ct_bpf_stats_invalid((void *)&bf_ct_map_stats);

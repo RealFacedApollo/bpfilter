@@ -948,7 +948,16 @@ int bf_program_generate(struct bf_program *program)
         r = bf_ct_emit_tail_call(program);
         if (r)
             return r;
-        EMIT(program, BPF_MOV64_IMM(BPF_REG_0, TCX_PASS));
+
+        /* Only reached when the tail call fails (prog-array slot missing,
+         * e.g. mid-reload): fall back to the chain policy through the
+         * flavor's verdict mapping. A fixed TCX_PASS here accepts packets the
+         * remaining segments would have dropped on TC/cgroup_skb, and reads
+         * as NF_DROP on netfilter hooks. */
+        r = program->runtime.ops->get_verdict(chain->policy, &ret_code);
+        if (r)
+            return r;
+        EMIT(program, BPF_MOV64_IMM(BPF_REG_0, ret_code));
         EMIT(program, BPF_EXIT_INSN());
 
         r = _bf_program_generate_elfstubs(program);

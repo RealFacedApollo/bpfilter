@@ -7,7 +7,6 @@
 #include <linux/in.h>
 
 #include <assert.h>
-#include <bpf/libbpf.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +14,7 @@
 
 #include <bpfilter/bpf.h>
 #include <bpfilter/ct.h>
+#include <bpfilter/helper.h>
 #include <bpfilter/logger.h>
 
 #define _BF_CT_GC_FLOW_MAPS 4
@@ -91,37 +91,6 @@ static int _bf_ct_gc_read_timeouts(int timeouts_fd,
     return 0;
 }
 
-static int _bf_ct_gc_stats_inc(int stats_fd, __u64 *phase1, __u64 *phase2)
-{
-    int ncpu = libbpf_num_possible_cpus();
-    __u32 key = 0;
-    struct ct_stats_counters *percpu;
-    int r;
-
-    if (ncpu <= 0)
-        return -EINVAL;
-
-    percpu = calloc((size_t)ncpu, sizeof(*percpu));
-    if (!percpu)
-        return -ENOMEM;
-
-    r = bf_bpf_map_lookup_elem(stats_fd, &key, percpu);
-    if (r) {
-        free(percpu);
-        return r;
-    }
-
-    if (phase1)
-        percpu[0].gc_phase1_marked += *phase1;
-    if (phase2)
-        percpu[0].gc_phase2_deleted += *phase2;
-
-    r = bf_bpf_map_update_elem(stats_fd, &key, percpu, BPF_ANY);
-    free(percpu);
-
-    return r;
-}
-
 /* Reconstruct the per-source key for the rate/count maps from a flow key.
  *
  * The flow key holds the full source and destination addresses (normalized to
@@ -172,40 +141,43 @@ static int _bf_ct_gc_src_count_dec(int src_count_fd, const void *key,
     return bf_bpf_map_update_elem(src_count_fd, &ip_key, &entry, BPF_EXIST);
 }
 
-static int _bf_ct_gc_process_entry(int map_fd, int src_count_fd,
-                                   const void *key, bool is_v6,
-                                   const struct ct_entry *entry,
-                                   const struct ct_timeouts *timeouts,
-                                   __u64 now_ns, __u64 *phase1, __u64 *phase2)
+/* Delete the corpses collected during a sweep. Each key is re-checked before
+ * deletion: the datapath may have replaced a DYING entry with a fresh one for
+ * the same flow key since the sweep visited it, and deleting the replacement
+ * would reap a live connection. */
+static int _bf_ct_gc_flush_deletions(int map_fd, int src_count_fd, bool is_v6,
+                                     const char *del_keys, size_t key_size,
+                                     size_t n_del, __u64 *phase2)
 {
-    struct ct_entry updated;
+    struct ct_entry entry;
     int r;
 
-    if (entry->flags & CT_FLAG_DYING) {
+    for (size_t i = 0; i < n_del; ++i) {
+        const void *key = &del_keys[i * key_size];
+
+        r = bf_bpf_map_lookup_elem(map_fd, key, &entry);
+        if (r == -ENOENT)
+            continue;
+        if (r)
+            return r;
+
+        if (!(entry.flags & CT_FLAG_DYING))
+            continue;
+
         r = bf_bpf_map_delete_elem(map_fd, key);
+        if (r == -ENOENT)
+            continue;
         if (r)
             return r;
 
         r = _bf_ct_gc_src_count_dec(src_count_fd, key, is_v6,
-                                    entry->orig_lo_is_src);
+                                    entry.orig_lo_is_src);
         if (r)
             return r;
 
         (*phase2)++;
-        return 0;
     }
 
-    if (now_ns - entry->last_seen_ns <= bf_ct_get_timeout_ns(entry, timeouts))
-        return 0;
-
-    updated = *entry;
-    updated.flags |= CT_FLAG_DYING;
-
-    r = bf_bpf_map_update_elem(map_fd, key, &updated, BPF_EXIST);
-    if (r)
-        return r;
-
-    (*phase1)++;
     return 0;
 }
 
@@ -217,15 +189,25 @@ static int _bf_ct_gc_sweep_map(int map_fd, int src_count_fd,
 {
     char prev_key[sizeof(struct ct_key_v6)];
     char next_key[sizeof(struct ct_key_v6)];
-    char lookup_key[sizeof(struct ct_key_v6)];
+    _cleanup_free_ char *del_keys = NULL;
     const void *prev = NULL;
     struct ct_entry entry;
     size_t key_size = _bf_ct_gc_key_size(map_idx);
+    size_t n_del = 0;
     unsigned swept = 0;
     int r;
 
     if (track_completion && gc->map_completed[map_idx])
         return 0;
+
+    /* Corpse deletions are deferred until the walk completes: deleting a key
+     * mid-walk invalidates it as a bpf_map_get_next_key() cursor, and for hash
+     * maps the kernel then restarts iteration from the first bucket — O(reaped
+     * × head-length) syscalls per batch, and entries near the end of the
+     * iteration order are starved. */
+    del_keys = malloc((size_t)batch_size * key_size);
+    if (!del_keys)
+        return -ENOMEM;
 
     if (gc->cursor_valid[map_idx]) {
         memcpy(prev_key, _bf_ct_gc_cursor_ptr(gc, map_idx), key_size);
@@ -243,29 +225,50 @@ static int _bf_ct_gc_sweep_map(int map_fd, int src_count_fd,
         if (r)
             return r;
 
-        memcpy(lookup_key, next_key, key_size);
         memcpy(prev_key, next_key, key_size);
         prev = prev_key;
 
-        r = bf_bpf_map_lookup_elem(map_fd, lookup_key, &entry);
+        r = bf_bpf_map_lookup_elem(map_fd, next_key, &entry);
         if (r) {
             if (r == -ENOENT)
                 continue;
             return r;
         }
 
-        r = _bf_ct_gc_process_entry(map_fd, src_count_fd, lookup_key,
-                                    _bf_ct_gc_map_is_v6[map_idx], &entry,
-                                    timeouts, now_ns, phase1, phase2);
-        if (r)
-            return r;
+        if (entry.flags & CT_FLAG_DYING) {
+            memcpy(&del_keys[n_del * key_size], next_key, key_size);
+            n_del++;
+            /* A queued key is about to disappear: it can't serve as the next
+             * batch's cursor, so the persisted cursor stays on the last
+             * visited key that survives the flush. */
+            swept++;
+            continue;
+        }
+
+        /* The datapath updates last_seen_ns with bpf_ktime_get_ns() while the
+         * sweep is in flight, so an entry touched after the now_ns snapshot
+         * has last_seen_ns > now_ns: without the first check, the unsigned
+         * subtraction wraps and the freshest entries are reaped. */
+        if (entry.last_seen_ns <= now_ns &&
+            now_ns - entry.last_seen_ns >
+                bf_ct_get_timeout_ns(&entry, timeouts)) {
+            entry.flags |= CT_FLAG_DYING;
+
+            r = bf_bpf_map_update_elem(map_fd, next_key, &entry, BPF_EXIST);
+            if (r)
+                return r;
+
+            (*phase1)++;
+        }
 
         memcpy(_bf_ct_gc_cursor_ptr(gc, map_idx), next_key, key_size);
         gc->cursor_valid[map_idx] = true;
         swept++;
     }
 
-    return 0;
+    return _bf_ct_gc_flush_deletions(map_fd, src_count_fd,
+                                     _bf_ct_gc_map_is_v6[map_idx], del_keys,
+                                     key_size, n_del, phase2);
 }
 
 void bf_ct_gc_init(struct bf_ct_gc *gc)
@@ -286,7 +289,6 @@ int bf_ct_gc_sweep_batch(const struct bf_ct_maps *maps, struct bf_ct_gc *gc,
     bool track_completion;
     int timeouts_fd;
     int src_count_fd;
-    int stats_fd;
     int r;
     int i;
 
@@ -304,10 +306,6 @@ int bf_ct_gc_sweep_batch(const struct bf_ct_maps *maps, struct bf_ct_gc *gc,
     src_count_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_SRC_COUNT);
     if (src_count_fd < 0)
         return src_count_fd;
-
-    stats_fd = bf_ct_maps_get_fd(maps, BF_CT_MAP_STATS);
-    if (stats_fd < 0)
-        return stats_fd;
 
     r = _bf_ct_gc_read_timeouts(timeouts_fd, &timeouts);
     if (r)
@@ -333,8 +331,7 @@ int bf_ct_gc_sweep_batch(const struct bf_ct_maps *maps, struct bf_ct_gc *gc,
     }
 
     if (phase1 || phase2) {
-        r = _bf_ct_gc_stats_inc(stats_fd, phase1 ? &phase1 : NULL,
-                                phase2 ? &phase2 : NULL);
+        r = bf_ct_meta_add_gc_stats(maps, phase1, phase2);
         if (r)
             return r;
     }
@@ -383,6 +380,12 @@ static int _bf_ct_gc_collect_sources(int map_fd, bool is_v6,
                 continue;
             return r;
         }
+
+        /* A DYING entry is already scheduled for deletion (which decrements
+         * src_count); counting it here would inflate the rebuilt counts by the
+         * number of pending corpses. */
+        if (entry.flags & CT_FLAG_DYING)
+            continue;
 
         if (*len == *cap) {
             size_t ncap = *cap ? *cap * 2 : 1024;
